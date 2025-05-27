@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
 import os
@@ -77,11 +78,13 @@ def read_string(addr: int) -> str:
 class MwccVersion:
     # Version name (e.g. "GC/1.1")
     name: str
-    # Breakpoint address for start of CodeGen_Generator, after gFunction has been set
-    codegen_addr: int
+    # Breakpoint address for start of CodeGen_Generator(), after gFunction has been set
+    codegen_start_addr: int
+    # Breakpoint address for end of CodeGen_Generator()
+    codegen_end_addr: int
     # Address of gFunction
     gfunction_addr: Optional[int]
-    # Address of CMangler_GetLinkName
+    # Address of CMangler_GetLinkName()
     cmangler_getlinkname_addr: int
     # Address of opcode info table
     opcodeinfo_addr: int
@@ -91,6 +94,14 @@ class MwccVersion:
     pcbasicblocks_addr: int
     # Breakpoint addresses for dumping pcode, with the names of output files
     pcode_breakpoints: dict[int, str]
+    # Breakpoint for regalloc, at the end of colorgraph()
+    regalloc_breakpoint_addr: int
+    # Address of interferencegraph
+    interferencegraph_addr: int
+    # Address of used_virtual_registers[RegClass_GPR]
+    used_virtual_registers_gpr_addr: int
+    # Address of used_virtual_registers[RegClass_FPR]
+    used_virtual_registers_fpr_addr: int
 
 
 MWCC_VERSION: MwccVersion = None
@@ -101,7 +112,8 @@ def init_mwcc_version():
     global MWCC_VERSION
     MWCC_VERSION = MwccVersion(
         name="GC/1.1",
-        codegen_addr=0x4351B0,
+        codegen_start_addr=0x4351B0,
+        codegen_end_addr=0x435DA9,
         gfunction_addr=None,
         cmangler_getlinkname_addr=0x4C2C70,
         opcodeinfo_addr=0x5664B0,
@@ -117,7 +129,39 @@ def init_mwcc_version():
             0x435D65: "06-after-final-scheduling.txt",
             0x435DA9: "07-final-code.txt",
         },
+        regalloc_breakpoint_addr=0x4CEB04,
+        interferencegraph_addr=0x58863C,
+        used_virtual_registers_gpr_addr=0x588C72,
+        used_virtual_registers_fpr_addr=0x588C70,
     )
+
+
+@dataclass
+class MwccObject:
+    name: str
+    linkname: Optional[str]
+
+    @classmethod
+    def load(cls, addr: int) -> Self:
+        # Force the linkname to be evaluated by calling CMangler_GetLinkName. Hopefully this
+        # doesn't cause any side effects.
+        gdb.execute(
+            f"call ((void (*) (void *)) {MWCC_VERSION.cmangler_getlinkname_addr:#x})({addr:#x})"
+        )
+        mem = gdb.selected_inferior().read_memory(addr, 0x36)
+        if MWCC_VERSION.name == "GC/1.1":
+            datatype = parse_u8(mem, 0x2)
+            name = read_string(parse_u32(mem, 0xA) + 0xA)
+            if datatype in (3, 4):  # FUNC, VFUNC
+                linkname = read_string(parse_u32(mem, 0x2E) + 0xA)
+            else:
+                linkname = None
+            return cls(
+                name=name,
+                linkname=linkname,
+            )
+        else:
+            raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
 
 
 @dataclass
@@ -190,7 +234,9 @@ class MwccPcode:
                     imm = parse_s32(arg_mem, arg_offset + 2)
                     obj_addr = parse_u32(arg_mem, arg_offset + 6)
                     args.append(
-                        MwccPCodeArg(MwccPCodeArg.Kind.MEMORY, imm=imm, obj_addr=obj_addr)
+                        MwccPCodeArg(
+                            MwccPCodeArg.Kind.MEMORY, imm=imm, obj_addr=obj_addr
+                        )
                     )
                 elif kind == 6:  # label
                     label_addr = parse_u32(arg_mem, arg_offset + 2)
@@ -266,6 +312,72 @@ class MwccPCodeLabel:
                 next_addr=read_u32(addr + 0x0),
                 block_addr=read_u32(addr + 0x4),
                 index=read_u16(addr + 0xA),
+            )
+        else:
+            raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+
+
+@dataclass
+class MwccIGNode:
+    class Flag(Enum):
+        fSpilled = 0
+        fCoalesced = 1
+        fCoalescedInto = 2
+        fPairHigh = 3
+        fPairLow = 4
+
+    next_addr: int
+    virtual_reg: int
+    physical_reg: int
+    cost: int
+    flags: list[Flag]
+    obj_name: Optional[str]
+    neighbors: list[int]
+
+    @classmethod
+    def load(cls, addr: int) -> Self:
+        if MWCC_VERSION.name == "GC/1.1":
+            mem = gdb.selected_inferior().read_memory(addr, 0x16)
+            next_addr = parse_u32(mem, 0x0)
+            obj_addr = parse_u32(mem, 0x4)
+            cost = parse_s32(mem, 0x8)
+            virtual_reg = parse_s16(mem, 0xC)
+            physical_reg = parse_s16(mem, 0x10)
+            flags_value = parse_u8(mem, 0x12)
+            num_neighbors = parse_s16(mem, 0x14)
+
+            mem = gdb.selected_inferior().read_memory(addr + 0x16, num_neighbors * 0x2)
+            neighbors = []
+            for i in range(num_neighbors):
+                neighbor = parse_s16(mem, i * 0x2)
+                neighbors.append(neighbor)
+
+            flags = []
+            if flags_value & 0x01:
+                flags.append(MwccIGNode.Flag.fSpilled)
+            if flags_value & 0x04:
+                flags.append(MwccIGNode.Flag.fCoalesced)
+            if flags_value & 0x08:
+                flags.append(MwccIGNode.Flag.fCoalescedInto)
+            if flags_value & 0x10:
+                flags.append(MwccIGNode.Flag.fPairHigh)
+            if flags_value & 0x20:
+                flags.append(MwccIGNode.Flag.fPairLow)
+
+            if obj_addr != 0:
+                obj = MwccObject.load(obj_addr)
+                obj_name = obj.name
+            else:
+                obj_name = None
+
+            return cls(
+                next_addr=next_addr,
+                virtual_reg=virtual_reg,
+                physical_reg=physical_reg,
+                cost=cost,
+                flags=flags,
+                obj_name=obj_name,
+                neighbors=neighbors,
             )
         else:
             raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
@@ -402,32 +514,141 @@ def print_pcode(output_file: str):
             block_addr = block.next_addr
 
 
-@dataclass
-class MwccObject:
-    name: str
-    linkname: Optional[str]
+GPR_PASS = 0
+FPR_PASS = 0
 
-    @classmethod
-    def load(cls, addr: int) -> Self:
-        # Force the linkname to be evaluated by calling CMangler_GetLinkName. Hopefully this
-        # doesn't cause any side effects.
-        gdb.execute(
-            f"call ((void (*) (void *)) {MWCC_VERSION.cmangler_getlinkname_addr:#x})({addr:#x})"
-        )
-        mem = gdb.selected_inferior().read_memory(addr, 0x36)
-        if MWCC_VERSION.name == "GC/1.1":
-            datatype = parse_u8(mem, 0x2)
-            name = read_string(parse_u32(mem, 0xA) + 0xA)
-            if datatype in (3, 4):  # FUNC, VFUNC
-                linkname = read_string(parse_u32(mem, 0x2E) + 0xA)
-            else:
-                linkname = None
-            return cls(
-                name=name,
-                linkname=linkname,
-            )
+
+def print_regalloc():
+    global GPR_PASS, FPR_PASS
+
+    assigned_nodes_addr = None
+    pass_number = 0
+    pass_name = ""
+    prefix = ""
+    num_regs = 0
+
+    # Find out which register class we are processing (GPR or FPR)
+    if MWCC_VERSION.name == "GC/1.1":
+        # Coloring class is first argument, assigned variables is second argument
+        sp = int(gdb.parse_and_eval("$esp"))
+        coloring_class = read_u32(sp + 0x4)
+        assigned_nodes_addr = read_u32(sp + 0x8)
+        if coloring_class == 0:
+            GPR_PASS += 1
+            pass_number = GPR_PASS
+            prefix = "r"
+            pass_name = "gpr"
+            num_regs = read_s16(MWCC_VERSION.used_virtual_registers_gpr_addr)
+        elif coloring_class == 1:
+            FPR_PASS += 1
+            pass_number = FPR_PASS
+            pass_name = "fpr"
+            prefix = "f"
+            num_regs = read_s16(MWCC_VERSION.used_virtual_registers_fpr_addr)
         else:
-            raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+            raise ValueError(f"Unexpected coloring class: {coloring_class}")
+    else:
+        raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+
+    # Read all interference graph nodes
+    graph_addr = read_u32(MWCC_VERSION.interferencegraph_addr)
+    mem = gdb.selected_inferior().read_memory(graph_addr, num_regs * 0x4)
+    nodes = OrderedDict()
+    for i in range(32, num_regs):
+        node_addr = parse_u32(mem, i * 0x4)
+        if node_addr == 0:
+            continue
+        node = MwccIGNode.load(node_addr)
+        nodes[node_addr] = node
+
+    output_path = Path(OUTPUT_DIR) / f"regalloc-{pass_name}-pass-{pass_number}-all.txt"
+    print(f"Dumping all registers to {output_path}")
+    with open(output_path, "w") as f:
+        for node in nodes.values():
+            if node.physical_reg == -1:
+                physical_reg = "fSpilled"
+            else:
+                physical_reg = f"{prefix}{node.physical_reg}"
+            print(
+                f"{prefix}{node.virtual_reg} -> {physical_reg}",
+                file=f,
+                end="",
+            )
+            if node.obj_name:
+                print(f" {node.obj_name}", file=f, end="")
+            print("", file=f)
+            print(f"  flags:", file=f, end="")
+            for flag in node.flags:
+                print(f" {flag.name}", file=f, end="")
+            print("", file=f)
+            print(f"  cost: {node.cost}", file=f)
+            if node.neighbors:
+                print(
+                    f"  neighbors: {len(node.neighbors)} ({" ".join(f"{prefix}{i}" for i in sorted(node.neighbors))})",
+                    file=f,
+                )
+            else:
+                print("  neighbors: 0", file=f)
+
+    output_path = (
+        Path(OUTPUT_DIR) / f"regalloc-{pass_name}-pass-{pass_number}-assigned.txt"
+    )
+    print(f"Dumping assigned registers to {output_path}")
+    with open(output_path, "w") as f:
+        # TODO: print free registers
+        assigned_nodes = []
+        while assigned_nodes_addr != 0:
+            assigned_nodes.append(nodes[assigned_nodes_addr])
+            assigned_nodes_addr = nodes[assigned_nodes_addr].next_addr
+
+        for i, node in enumerate(assigned_nodes):
+            prev_neighbors = set(node.neighbors)
+            for j in range(i, len(assigned_nodes)):
+                prev_neighbors.discard(assigned_nodes[j].virtual_reg)
+            if node.physical_reg == -1:
+                physical_reg = "fSpilled"
+            else:
+                physical_reg = f"{prefix}{node.physical_reg}"
+            print(
+                f"{prefix}{node.virtual_reg} -> {physical_reg}",
+                file=f,
+                end="",
+            )
+            if node.obj_name:
+                print(f" {node.obj_name}", file=f, end="")
+            print("", file=f)
+            print(f"  flags:", file=f, end="")
+            for flag in node.flags:
+                print(f" {flag.name}", file=f, end="")
+            print("", file=f)
+            print(f"  cost: {node.cost}", file=f)
+            print(
+                f"  adjusted cost: {node.cost / len(prev_neighbors) if prev_neighbors else 0:.2f}",
+                file=f,
+            )
+            if prev_neighbors:
+                print(
+                    f"  previous neighbors: {len(prev_neighbors)} ({" ".join(f"{prefix}{i}" for i in sorted(prev_neighbors))})",
+                    file=f,
+                )
+            else:
+                print("  previous neighbors: 0", file=f)
+            if node.neighbors:
+                print(
+                    f"  neighbors: {len(node.neighbors)} ({" ".join(f"{prefix}{i}" for i in sorted(node.neighbors))})",
+                    file=f,
+                )
+            else:
+                print("  neighbors: 0", file=f)
+
+
+def print_variables():
+    output_file = "variables.txt"
+    output_path = Path(OUTPUT_DIR) / output_file
+    print(f"Dumping variables to {output_path}")
+    with open(output_path, "w") as f:
+        # TODO: implement
+        pass
 
 
 def find_current_function() -> MwccObject:
@@ -464,7 +685,7 @@ def run_compiler():
     init_mwcc_version()
 
     # Find the function to analyze
-    gdb.execute(f"break *{MWCC_VERSION.codegen_addr:#x}")
+    gdb.execute(f"break *{MWCC_VERSION.codegen_start_addr:#x}")
 
     while True:
         gdb.execute("continue")
@@ -477,6 +698,8 @@ def run_compiler():
     print(f"Analyzing function {func.linkname}")
 
     # Set breakpoints
+    gdb.execute(f"break *{MWCC_VERSION.codegen_end_addr:#x}")
+    gdb.execute(f"break *{MWCC_VERSION.regalloc_breakpoint_addr:#x}")
     for addr in MWCC_VERSION.pcode_breakpoints:
         gdb.execute(f"break *{addr:#x}")
 
@@ -484,15 +707,17 @@ def run_compiler():
     while True:
         gdb.execute("continue")
         current_addr = int(gdb.parse_and_eval("$pc"))
-        if current_addr == MWCC_VERSION.codegen_addr:
-            # We started compiling a new function, so exit
-            gdb.execute("quit")
-        elif current_addr in MWCC_VERSION.pcode_breakpoints:
+
+        if current_addr in MWCC_VERSION.pcode_breakpoints:
             output_file = MWCC_VERSION.pcode_breakpoints[current_addr]
             print_pcode(output_file)
-        else:
-            print(f"Reached unexpected address: {current_addr:#x}")
-            break
+
+        if current_addr == MWCC_VERSION.regalloc_breakpoint_addr:
+            print_regalloc()
+
+        if current_addr == MWCC_VERSION.codegen_end_addr:
+            print_variables()
+            gdb.execute("quit")
 
 
 def start_gdb():
