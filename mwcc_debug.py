@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 from dataclasses import dataclass
+from enum import Enum
 import os
 from pathlib import Path
 import shlex
@@ -79,9 +80,17 @@ class MwccVersion:
     # Breakpoint address for start of CodeGen_Generator, after gFunction has been set
     codegen_addr: int
     # Address of gFunction
-    gfunction_addr: Optional[int] = None
+    gfunction_addr: Optional[int]
     # Address of CMangler_GetLinkName
-    cmangler_getlinkname_addr: Optional[int] = None
+    cmangler_getlinkname_addr: int
+    # Address of opcode info table
+    opcodeinfo_addr: int
+    # Number of entries in the opcode info table
+    opcodeinfo_size: int
+    # Address of pcbasicblocks
+    pcbasicblocks_addr: int
+    # Breakpoint addresses for dumping pcode, with the names of output files
+    pcode_breakpoints: dict[int, str]
 
 
 MWCC_VERSION: MwccVersion = None
@@ -92,10 +101,305 @@ def init_mwcc_version():
     global MWCC_VERSION
     MWCC_VERSION = MwccVersion(
         name="GC/1.1",
-        codegen_addr=0x435BEE,
+        codegen_addr=0x4351B0,
         gfunction_addr=None,
         cmangler_getlinkname_addr=0x4C2C70,
+        opcodeinfo_addr=0x5664B0,
+        opcodeinfo_size=468,
+        pcbasicblocks_addr=0x588474,
+        pcode_breakpoints={
+            0x435AF4: "00-initial-code.txt",
+            0x435B69: "01-before-scheduling.txt",
+            0x435B6E: "02-after-scheduling.txt",
+            0x435BEE: "03-before-regalloc.txt",
+            0x435BF3: "04-after-regalloc.txt",
+            0x435D60: "05-before-final-scheduling.txt",
+            0x435D65: "06-after-final-scheduling.txt",
+            0x435DA9: "07-final-code.txt",
+        },
     )
+
+
+@dataclass
+class MwccOpcodeInfo:
+    mnemonic: str
+    format_str: str
+
+
+@dataclass
+class MwccPCodeArg:
+    class Kind(Enum):
+        GPR = 0  # General Purpose Register
+        FPR = 1  # Floating Point Register
+        SPR = 2  # Special Purpose Register
+        CRFIELD = 3  # Condition Register Field
+        VR = 4  # Vector Register
+        IMMEDIATE = 5  # Immediate Value
+        MEMORY = 6  # Memory Address
+        LABEL = 7  # Label
+        PLACEHOLDER = 8  # Placeholder for unused arguments
+
+    kind: Kind
+    reg: Optional[int] = None  # For GPR, FPR, SPR, crfield, vector register
+    imm: Optional[int] = None  # For immediate, memory
+    obj_addr: Optional[int] = None  # For memory
+    block_index: Optional[int] = None  # For label
+
+
+@dataclass
+class MwccPcode:
+    next_addr: int
+    op: int
+    record_bit: bool  # fRecordBit flag
+    # TODO: other flags
+    args: list[MwccPCodeArg]
+
+    @classmethod
+    def load(cls, addr: int) -> Self:
+        if MWCC_VERSION.name == "GC/1.1":
+            mem = gdb.selected_inferior().read_memory(addr, 0x1C)
+            flags = parse_u32(mem, 0x16)
+            arg_count = parse_s16(mem, 0x1A)
+            arg_mem = gdb.selected_inferior().read_memory(addr + 0x1C, arg_count * 0xC)
+
+            args = []
+            for i in range(arg_count):
+                arg_offset = i * 0xC
+                kind = parse_u8(arg_mem, arg_offset)
+                if kind == 0:  # GPR
+                    reg = parse_u16(arg_mem, arg_offset + 2)
+                    args.append(MwccPCodeArg(MwccPCodeArg.Kind.GPR, reg=reg))
+                elif kind == 1:  # FPR
+                    reg = parse_u16(arg_mem, arg_offset + 2)
+                    args.append(MwccPCodeArg(MwccPCodeArg.Kind.FPR, reg=reg))
+                elif kind == 2:  # SPR
+                    reg = parse_u16(arg_mem, arg_offset + 2)
+                    args.append(MwccPCodeArg(MwccPCodeArg.Kind.SPR, reg=reg))
+                elif kind == 3:  # crfield
+                    reg = parse_u16(arg_mem, arg_offset + 2)
+                    args.append(MwccPCodeArg(MwccPCodeArg.Kind.CRFIELD, reg=reg))
+                elif kind == 4:  # immediate
+                    imm = parse_s32(arg_mem, arg_offset + 2)
+                    obj_addr = parse_u32(arg_mem, arg_offset + 6)
+                    args.append(
+                        MwccPCodeArg(
+                            MwccPCodeArg.Kind.IMMEDIATE, imm=imm, obj_addr=obj_addr
+                        )
+                    )
+                elif kind == 5:  # memory
+                    imm = parse_s32(arg_mem, arg_offset + 2)
+                    obj_addr = parse_u32(arg_mem, arg_offset + 6)
+                    args.append(
+                        MwccPCodeArg(MwccPCodeArg.Kind.MEMORY, imm=imm, obj_addr=obj_addr)
+                    )
+                elif kind == 6:  # label
+                    label_addr = parse_u32(arg_mem, arg_offset + 2)
+                    label = MwccPCodeLabel.load(label_addr)
+                    block = MwccBlock.load(label.block_addr)
+                    block_index = block.index
+                    args.append(
+                        MwccPCodeArg(MwccPCodeArg.Kind.LABEL, block_index=block_index)
+                    )
+                elif kind == 9:  # vector register
+                    reg = parse_u16(arg_mem, arg_offset + 2)
+                    args.append(MwccPCodeArg(MwccPCodeArg.Kind.VR, reg=reg))
+                elif kind == 10:  # placeholder
+                    args.append(MwccPCodeArg(MwccPCodeArg.Kind.PLACEHOLDER))
+                else:
+                    raise ValueError(f"Unknown operand kind: {kind}")
+
+            return cls(
+                next_addr=read_u32(addr + 0x0),
+                op=read_s16(addr + 0x14),
+                record_bit=bool(flags & 0x20000000),
+                args=args,
+            )
+        else:
+            raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+
+
+@dataclass
+class MwccBlock:
+    next_addr: int
+    prev_addr: int
+    label_addr: int
+    predecessors_addr: int
+    successors_addr: int
+    instr_addr: int
+    index: int
+    loop_weight: int
+    pcode_count: int
+    flags: int  # TODO: parse flags
+
+    @classmethod
+    def load(cls, addr: int) -> Self:
+        if MWCC_VERSION.name == "GC/1.1":
+            size = 0x20
+            mem = gdb.selected_inferior().read_memory(addr, 0x30)
+            return cls(
+                next_addr=read_u32(addr + 0x0),
+                prev_addr=read_u32(addr + 0x4),
+                label_addr=read_u32(addr + 0x8),
+                predecessors_addr=read_u32(addr + 0xC),
+                successors_addr=read_u32(addr + 0x10),
+                instr_addr=read_u32(addr + 0x14),
+                index=read_s32(addr + 0x1C),
+                loop_weight=read_s32(addr + 0x28),
+                pcode_count=read_s16(addr + 0x2C),
+                flags=read_u16(addr + 0x2E),
+            )
+        else:
+            raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+
+
+@dataclass
+class MwccPCodeLabel:
+    next_addr: int
+    block_addr: int
+    index: int
+
+    @classmethod
+    def load(cls, addr: int) -> Self:
+        if MWCC_VERSION.name == "GC/1.1":
+            mem = gdb.selected_inferior().read_memory(addr, 0xC)
+            return cls(
+                next_addr=read_u32(addr + 0x0),
+                block_addr=read_u32(addr + 0x4),
+                index=read_u16(addr + 0xA),
+            )
+        else:
+            raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+
+
+MWCC_OPCODE_INFO: list[MwccOpcodeInfo] = []
+
+
+def load_opcode_info():
+    if MWCC_OPCODE_INFO:
+        return
+
+    if MWCC_VERSION.name == "GC/1.1":
+        size = 0x10
+    else:
+        raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+
+    # Load opcode info from the binary
+    mem = gdb.selected_inferior().read_memory(
+        MWCC_VERSION.opcodeinfo_addr, MWCC_VERSION.opcodeinfo_size * size
+    )
+    for i in range(MWCC_VERSION.opcodeinfo_size):
+        offset = i * size
+        mnemonic = read_string(parse_u32(mem, offset))
+        format_str = read_string(parse_u32(mem, offset + 4))
+        MWCC_OPCODE_INFO.append(
+            MwccOpcodeInfo(mnemonic=mnemonic, format_str=format_str)
+        )
+
+
+def format_operands(instr) -> str:
+    out = ""
+    arg_count = len(instr.args)
+    for i in range(min(arg_count, 6)):
+        arg = instr.args[i]
+
+        if arg.kind == MwccPCodeArg.Kind.PLACEHOLDER:
+            continue
+
+        if i != 0:
+            out += ","
+
+        if arg.kind == MwccPCodeArg.Kind.GPR:
+            out += f"r{arg.reg}"
+        elif arg.kind == MwccPCodeArg.Kind.FPR:
+            out += f"f{arg.reg}"
+        elif arg.kind == MwccPCodeArg.Kind.SPR:
+            if arg.reg == 0:
+                out += "zero"
+            elif arg.reg == 1:
+                out += "ctr"
+            elif arg.reg == 2:
+                out += "lr"
+            else:
+                out += f"spr{arg.reg}"
+        elif arg.kind == MwccPCodeArg.Kind.CRFIELD:
+            out += f"cr{arg.reg}"
+        elif arg.kind == MwccPCodeArg.Kind.VR:
+            out += f"vr{arg.reg}"
+        elif arg.kind in (MwccPCodeArg.Kind.IMMEDIATE, MwccPCodeArg.Kind.MEMORY):
+            if arg.imm < 0:
+                out += f"-0x{-arg.imm:x}"
+            elif arg.imm < 10:
+                out += str(arg.imm)
+            else:
+                out += f"0x{arg.imm:x}"
+            if arg.obj_addr != 0:
+                obj = MwccObject.load(arg.obj_addr)
+                out += f"({obj.name})"
+        elif arg.kind == MwccPCodeArg.Kind.LABEL:
+            out += f"B{arg.block_index}"
+        else:
+            raise ValueError(f"Unknown operand kind: {arg.kind}")
+
+    if arg_count > 6:
+        out += ",..."
+
+    return out
+
+
+def print_instruction(f, instr: MwccPcode):
+    operands = format_operands(instr)
+    mnemonic = MWCC_OPCODE_INFO[instr.op].mnemonic.lower() + (
+        "." if instr.record_bit else ""
+    )
+    # TODO: print offset or source location?
+    print(f"  {mnemonic:<8} {operands}", file=f)
+
+
+def print_block(f, block: MwccBlock):
+    print(
+        f":{{{block.flags:04x}}}::::::::::::::::::::::::::::::::::::::::LOOPWEIGHT={block.loop_weight}",
+        file=f,
+    )
+    print(f"B{block.index}: ", end="", file=f)
+    print("Successors = { ", end="", file=f)
+    link_addr = block.successors_addr
+    while link_addr != 0:
+        link_block = MwccBlock.load(read_u32(link_addr + 0x4))
+        print(f"B{link_block.index} ", end="", file=f)
+        link_addr = read_u32(link_addr + 0x0)
+    print("}  Predecessors = { ", end="", file=f)
+    link_addr = block.predecessors_addr
+    while link_addr != 0:
+        link_block = MwccBlock.load(read_u32(link_addr + 0x4))
+        print(f"B{link_block.index} ", end="", file=f)
+        link_addr = read_u32(link_addr + 0x0)
+    print("}  Labels = { ", end="", file=f)
+    label_addr = block.label_addr
+    while label_addr != 0:
+        label = MwccPCodeLabel.load(label_addr)
+        print(f"L{label.index} ", end="", file=f)
+        label_addr = label.next_addr
+    print("}", file=f)
+
+    instr_addr = block.instr_addr
+    while instr_addr != 0:
+        instr = MwccPcode.load(instr_addr)
+        print_instruction(f, instr)
+        instr_addr = instr.next_addr
+
+    print("", file=f)
+
+
+def print_pcode(output_file: str):
+    load_opcode_info()
+    output_path = Path(OUTPUT_DIR) / output_file
+    print(f"Dumping pcode to {output_path}")
+    with open(Path(OUTPUT_DIR) / output_file, "w") as f:
+        block_addr = read_u32(MWCC_VERSION.pcbasicblocks_addr)
+        while block_addr != 0:
+            block = MwccBlock.load(block_addr)
+            print_block(f, block)
+            block_addr = block.next_addr
 
 
 @dataclass
@@ -172,6 +476,24 @@ def run_compiler():
     print()
     print(f"Analyzing function {func.linkname}")
 
+    # Set breakpoints
+    for addr in MWCC_VERSION.pcode_breakpoints:
+        gdb.execute(f"break *{addr:#x}")
+
+    # Loop through breakpoints
+    while True:
+        gdb.execute("continue")
+        current_addr = int(gdb.parse_and_eval("$pc"))
+        if current_addr == MWCC_VERSION.codegen_addr:
+            # We started compiling a new function, so exit
+            gdb.execute("quit")
+        elif current_addr in MWCC_VERSION.pcode_breakpoints:
+            output_file = MWCC_VERSION.pcode_breakpoints[current_addr]
+            print_pcode(output_file)
+        else:
+            print(f"Reached unexpected address: {current_addr:#x}")
+            break
+
 
 def start_gdb():
     # TODO: Run ninja to get compiler path and arguments?
@@ -203,8 +525,7 @@ def start_gdb():
     parser.add_argument("OUTPUT_DIR", help="Output directory for debug files")
 
     args = parser.parse_args()
-    output_dir = os.path.abspath(args.OUTPUT_DIR)
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(args.OUTPUT_DIR, exist_ok=True)
 
     emulator_command = [
         args.emulator,
@@ -223,7 +544,7 @@ def start_gdb():
         "-batch",
         "-nx",
         "-ex",
-        f"py FUNCTION_NAME = {args.function!r}",
+        f"py FUNCTION_NAME = {args.function!r}; OUTPUT_DIR = {args.OUTPUT_DIR!r}",
         "-x",
         str(Path(__file__).resolve()),
     ]
