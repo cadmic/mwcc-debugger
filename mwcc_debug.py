@@ -120,14 +120,14 @@ def init_mwcc_version():
         opcodeinfo_size=468,
         pcbasicblocks_addr=0x588474,
         pcode_breakpoints={
-            0x435AF4: "00-initial-code.txt",
-            0x435B69: "01-before-scheduling.txt",
-            0x435B6E: "02-after-scheduling.txt",
-            0x435BEE: "03-before-regalloc.txt",
-            0x435BF3: "04-after-regalloc.txt",
-            0x435D60: "05-before-final-scheduling.txt",
-            0x435D65: "06-after-final-scheduling.txt",
-            0x435DA9: "07-final-code.txt",
+            0x435AF4: "backend-00-initial-code.txt",
+            0x435B69: "backend-01-before-scheduling.txt",
+            0x435B6E: "backend-02-after-scheduling.txt",
+            0x435BEE: "backend-03-before-regalloc.txt",
+            0x435BF3: "backend-04-after-regalloc.txt",
+            0x435D60: "backend-05-before-final-scheduling.txt",
+            0x435D65: "backend-06-after-final-scheduling.txt",
+            0x435DA9: "backend-07-final-code.txt",
         },
         regalloc_breakpoint_addr=0x4CEB04,
         interferencegraph_addr=0x58863C,
@@ -194,15 +194,14 @@ class MwccPCodeArg:
 class MwccPcode:
     next_addr: int
     op: int
-    record_bit: bool  # fRecordBit flag
-    # TODO: other flags
+    # TODO: flags
     args: list[MwccPCodeArg]
 
     @classmethod
     def load(cls, addr: int) -> Self:
         if MWCC_VERSION.name == "GC/1.1":
             mem = gdb.selected_inferior().read_memory(addr, 0x1C)
-            flags = parse_u32(mem, 0x16)
+            # flags = parse_u32(mem, 0x16)
             arg_count = parse_s16(mem, 0x1A)
             if arg_count > 0:
                 arg_mem = gdb.selected_inferior().read_memory(
@@ -260,7 +259,6 @@ class MwccPcode:
             return cls(
                 next_addr=read_u32(addr + 0x0),
                 op=read_s16(addr + 0x14),
-                record_bit=bool(flags & 0x20000000),
                 args=args,
             )
         else:
@@ -466,9 +464,8 @@ def format_operands(instr) -> str:
 
 def print_instruction(f, instr: MwccPcode):
     operands = format_operands(instr)
-    mnemonic = MWCC_OPCODE_INFO[instr.op].mnemonic.lower() + (
-        "." if instr.record_bit else ""
-    )
+    # TODO: show "record" bit as dot
+    mnemonic = MWCC_OPCODE_INFO[instr.op].mnemonic.lower()
     # TODO: print offset or source location?
     print(f"  {mnemonic:<8} {operands}", file=f)
 
@@ -511,7 +508,7 @@ def print_block(f, block: MwccBlock):
 def print_pcode(output_file: str):
     load_opcode_info()
     output_path = Path(OUTPUT_DIR) / output_file
-    print(f"Dumping pcode to {output_path}")
+    print(f"Dumping PCode to {output_path}")
     with open(Path(OUTPUT_DIR) / output_file, "w") as f:
         block_addr = read_u32(MWCC_VERSION.pcbasicblocks_addr)
         while block_addr != 0:
@@ -650,12 +647,13 @@ def print_regalloc():
 
 
 def print_variables():
-    output_file = "variables.txt"
-    output_path = Path(OUTPUT_DIR) / output_file
-    print(f"Dumping variables to {output_path}")
-    with open(output_path, "w") as f:
-        # TODO: implement
-        pass
+    # TODO: implement
+    pass
+    # output_file = "variables.txt"
+    # output_path = Path(OUTPUT_DIR) / output_file
+    # print(f"Dumping variables to {output_path}")
+    # with open(output_path, "w") as f:
+    #     pass
 
 
 def find_current_function() -> MwccObject:
@@ -699,12 +697,12 @@ def run_compiler():
     while True:
         gdb.execute("continue")
         func = find_current_function()
-        print(f"Compiling function {func.linkname}")
-        if FUNCTION_NAME is None or func.linkname == FUNCTION_NAME:
+        print(f"Skipping function {func.linkname}")
+        if func.linkname == FUNCTION_NAME:
             break
 
     print()
-    print(f"Analyzing function {func.linkname}")
+    print(f"Found function {func.linkname}")
 
     # Set breakpoints
     gdb.execute(f"break *{MWCC_VERSION.codegen_end_addr:#x}")
@@ -735,41 +733,42 @@ def start_gdb():
         description="Dump MWCC compiler internals while compiling a file."
     )
     parser.add_argument(
+        "--args",
+        "-a",
+        required=True,
+        help="compiler command line (in quotes), starting with mwcceppc.exe",
+    )
+    parser.add_argument(
         "--emulator",
         "-e",
         default="retrowin32",
-        help="Path to retrowin32 (default: retrowin32)",
+        help="path to retrowin32 (default: retrowin32)",
     )
     parser.add_argument(
         "--gdb",
         "-g",
-        default="gdb-multiarch",
-        help="Path to x86 gdb (default: gdb-multiarch)",
-    )
-    parser.add_argument("--compiler", "-c", required=True, help="Path to mwcceppc.exe")
-    parser.add_argument(
-        "--args", "-a", required=True, help="Compiler arguments (in quotes)"
+        default="gdb",
+        help="path to x86 gdb (default: gdb)",
     )
     parser.add_argument(
-        "--function",
-        "-f",
-        help="The (mangled) name of the function to analyze (default: first function found)",
+        "FUNCTION_NAME", help="the (mangled) name of the function to analyze"
     )
-    parser.add_argument("INPUT_FILE", help="Input C file")
-    parser.add_argument("OUTPUT_DIR", help="Output directory for debug files")
+    parser.add_argument(
+        "OUTPUT_DIR",
+        nargs="?",
+        help="output directory for debug files (default: debug-FUNCTION_NAME)",
+    )
 
     args = parser.parse_args()
-    os.makedirs(args.OUTPUT_DIR, exist_ok=True)
+    function_name = args.FUNCTION_NAME
+    output_dir = args.OUTPUT_DIR or f"debug-{function_name}"
+
+    os.makedirs(output_dir, exist_ok=True)
 
     emulator_command = [
         args.emulator,
         "--gdb-stub",
-        args.compiler,
-        "-c",
         *shlex.split(args.args),
-        args.INPUT_FILE,
-        "-o",
-        "/dev/null",
     ]
     print(f"Emulator command: {shlex.join(emulator_command)}", file=sys.stderr)
 
@@ -778,7 +777,7 @@ def start_gdb():
         "-batch",
         "-nx",
         "-ex",
-        f"py FUNCTION_NAME = {args.function!r}; OUTPUT_DIR = {args.OUTPUT_DIR!r}",
+        f"py FUNCTION_NAME = {function_name!r}; OUTPUT_DIR = {output_dir!r}",
         "-x",
         str(Path(__file__).resolve()),
     ]
