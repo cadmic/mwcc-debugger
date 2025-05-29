@@ -6,7 +6,7 @@ and uses `gdb` to set breakpoints and inspect the compiler's memory.
 
 Currently the following MWCC versions are supported:
 * GC/1.1 (usually good enough for GC/1.0 - GC/1.2.5)
-* TODO: GC/2.6 (usually good enough for GC/1.3 - GC/2.7)
+* GC/2.6 (usually good enough for GC/1.3.2 - GC/2.7)
 
 ## Installation (Linux or macOS)
 

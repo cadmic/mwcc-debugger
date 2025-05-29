@@ -102,38 +102,71 @@ class MwccVersion:
     used_virtual_registers_gpr_addr: int
     # Address of used_virtual_registers[RegClass_FPR]
     used_virtual_registers_fpr_addr: int
+    # Address of coloring_class
+    coloring_class_addr: Optional[int]
 
 
 MWCC_VERSION: MwccVersion = None
 
 
 def init_mwcc_version():
-    # TODO: detect compiler version
     global MWCC_VERSION
-    MWCC_VERSION = MwccVersion(
-        name="GC/1.1",
-        codegen_start_addr=0x4351B0,
-        codegen_end_addr=0x435DA9,
-        gfunction_addr=None,
-        cmangler_getlinkname_addr=0x4C2C70,
-        opcodeinfo_addr=0x5664B0,
-        opcodeinfo_size=468,
-        pcbasicblocks_addr=0x588474,
-        pcode_breakpoints={
-            0x435AF4: "backend-00-initial-code.txt",
-            0x435B69: "backend-01-before-scheduling.txt",
-            0x435B6E: "backend-02-after-scheduling.txt",
-            0x435BEE: "backend-03-before-regalloc.txt",
-            0x435BF3: "backend-04-after-regalloc.txt",
-            0x435D60: "backend-05-before-final-scheduling.txt",
-            0x435D65: "backend-06-after-final-scheduling.txt",
-            0x435DA9: "backend-07-final-code.txt",
-        },
-        regalloc_breakpoint_addr=0x4CEB04,
-        interferencegraph_addr=0x58863C,
-        used_virtual_registers_gpr_addr=0x588C72,
-        used_virtual_registers_fpr_addr=0x588C70,
-    )
+    # Look for string "Metrowerks C/C++ Compiler for Embedded PowerPC"
+    if bytes(gdb.selected_inferior().read_memory(0x541BBC, 10)) == b"Metrowerks":
+        MWCC_VERSION = MwccVersion(
+            name="GC/1.1",
+            codegen_start_addr=0x4351B0,
+            codegen_end_addr=0x435DA9,
+            gfunction_addr=None,
+            cmangler_getlinkname_addr=0x4C2C70,
+            opcodeinfo_addr=0x5664B0,
+            opcodeinfo_size=468,
+            pcbasicblocks_addr=0x588474,
+            pcode_breakpoints={
+                0x435AF4: "backend-00-initial-code.txt",
+                0x435B69: "backend-01-before-scheduling.txt",
+                0x435B6E: "backend-02-after-scheduling.txt",
+                0x435BEE: "backend-03-before-regalloc.txt",
+                0x435BF3: "backend-04-after-regalloc.txt",
+                0x435D60: "backend-05-before-final-scheduling.txt",
+                0x435D65: "backend-06-after-final-scheduling.txt",
+                0x435DA9: "backend-07-final-code.txt",
+            },
+            regalloc_breakpoint_addr=0x4CEB04,
+            interferencegraph_addr=0x58863C,
+            used_virtual_registers_gpr_addr=0x588C72,
+            used_virtual_registers_fpr_addr=0x588C70,
+            coloring_class_addr=None,
+        )
+    elif bytes(gdb.selected_inferior().read_memory(0x58D224, 10)) == b"Metrowerks":
+        MWCC_VERSION = MwccVersion(
+            name="GC/2.6",
+            codegen_start_addr=0x433492,
+            codegen_end_addr=0x4340B1,
+            gfunction_addr=0x05E9EC0,
+            cmangler_getlinkname_addr=0x4FE6A0,
+            opcodeinfo_addr=0x5C0FA8,
+            opcodeinfo_size=471,
+            pcbasicblocks_addr=0x5EA748,
+            pcode_breakpoints={
+                0x433D77: "backend-00-initial-code.txt",
+                0x433E07: "backend-01-before-scheduling.txt",
+                0x433E0C: "backend-02-after-scheduling.txt",
+                0x433EA6: "backend-03-before-regalloc.txt",
+                0x433EAB: "backend-04-after-regalloc.txt",
+                0x43405E: "backend-05-before-final-scheduling.txt",
+                0x434063: "backend-06-after-final-scheduling.txt",
+                0x4340B1: "backend-07-final-code.txt",
+            },
+            regalloc_breakpoint_addr=0x5089A9,
+            interferencegraph_addr=0x5EA768,
+            used_virtual_registers_gpr_addr=0x5EAA3C,
+            used_virtual_registers_fpr_addr=0x5EAA38,
+            coloring_class_addr=0x5EB2CF,
+        )
+    else:
+        raise ValueError("Unsupported MWCC version or not an MWCC binary")
+    print(f"MWCC version: {MWCC_VERSION.name}")
 
 
 @dataclass
@@ -142,26 +175,29 @@ class MwccObject:
     linkname: Optional[str]
 
     @classmethod
-    def load(cls, addr: int) -> Self:
+    def load(cls, addr: int, load_linkname=False) -> Self:
         # Force the linkname to be evaluated by calling CMangler_GetLinkName. Hopefully this
         # doesn't cause any side effects.
         gdb.execute(
             f"call ((void (*) (void *)) {MWCC_VERSION.cmangler_getlinkname_addr:#x})({addr:#x})"
         )
         mem = gdb.selected_inferior().read_memory(addr, 0x36)
-        if MWCC_VERSION.name == "GC/1.1":
-            datatype = parse_u8(mem, 0x2)
-            name = read_string(parse_u32(mem, 0xA) + 0xA)
-            if datatype in (3, 4):  # FUNC, VFUNC
-                linkname = read_string(parse_u32(mem, 0x2E) + 0xA)
+        datatype = parse_u8(mem, 0x2)
+        name = read_string(parse_u32(mem, 0xA) + 0xA)
+        if load_linkname and datatype in (3, 4):  # FUNC, VFUNC
+            if MWCC_VERSION.name == "GC/1.1":
+                offset = 0x2E
+            elif MWCC_VERSION.name == "GC/2.6":
+                offset = 0x32
             else:
-                linkname = None
-            return cls(
-                name=name,
-                linkname=linkname,
-            )
+                raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+            linkname = read_string(parse_u32(mem, offset) + 0xA)
         else:
-            raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+            linkname = None
+        return cls(
+            name=name,
+            linkname=linkname,
+        )
 
 
 @dataclass
@@ -257,8 +293,73 @@ class MwccPcode:
                     raise ValueError(f"Unknown operand kind: {kind}")
 
             return cls(
-                next_addr=read_u32(addr + 0x0),
-                op=read_s16(addr + 0x14),
+                next_addr=parse_u32(mem, 0x0),
+                op=parse_s16(mem, 0x14),
+                args=args,
+            )
+        elif MWCC_VERSION.name == "GC/2.6":
+            mem = gdb.selected_inferior().read_memory(addr, 0x24)
+            arg_count = parse_s16(mem, 0x22)
+            if arg_count > 0:
+                arg_mem = gdb.selected_inferior().read_memory(
+                    addr + 0x24, arg_count * 0xC
+                )
+
+            args = []
+            for i in range(arg_count):
+                arg_offset = i * 0xC
+                kind = parse_u8(arg_mem, arg_offset)
+                if kind == 0:  # Register
+                    regclass = parse_u8(arg_mem, arg_offset + 1)
+                    reg = parse_u16(arg_mem, arg_offset + 4)
+                    if regclass == 0:  # SPR
+                        kind = MwccPCodeArg.Kind.SPR
+                    elif regclass == 1:  # crfield
+                        kind = MwccPCodeArg.Kind.CRFIELD
+                    elif regclass == 2:  # vector register
+                        kind = MwccPCodeArg.Kind.VR
+                    elif regclass == 3:  # FPR
+                        kind = MwccPCodeArg.Kind.FPR
+                    elif regclass == 4:  # GPR
+                        kind = MwccPCodeArg.Kind.GPR
+                    else:
+                        raise ValueError(f"Unknown register class: {regclass}")
+                    args.append(MwccPCodeArg(kind, reg=reg))
+                elif kind == 1:  # sysreg
+                    reg = parse_u16(arg_mem, arg_offset + 4)
+                    args.append(MwccPCodeArg(MwccPCodeArg.Kind.SPR, reg=reg))
+                elif kind == 2:  # immediate
+                    imm = parse_s32(arg_mem, arg_offset + 2)
+                    obj_addr = parse_u32(arg_mem, arg_offset + 6)
+                    args.append(
+                        MwccPCodeArg(
+                            MwccPCodeArg.Kind.IMMEDIATE, imm=imm, obj_addr=obj_addr
+                        )
+                    )
+                elif kind == 3:  # memory
+                    imm = parse_s32(arg_mem, arg_offset + 2)
+                    obj_addr = parse_u32(arg_mem, arg_offset + 6)
+                    args.append(
+                        MwccPCodeArg(
+                            MwccPCodeArg.Kind.MEMORY, imm=imm, obj_addr=obj_addr
+                        )
+                    )
+                elif kind == 4:  # label
+                    label_addr = parse_u32(arg_mem, arg_offset + 2)
+                    label = MwccPCodeLabel.load(label_addr)
+                    block = MwccBlock.load(label.block_addr)
+                    block_index = block.index
+                    args.append(
+                        MwccPCodeArg(MwccPCodeArg.Kind.LABEL, block_index=block_index)
+                    )
+                elif kind == 6:  # placeholder
+                    args.append(MwccPCodeArg(MwccPCodeArg.Kind.PLACEHOLDER))
+                else:
+                    raise ValueError(f"Unknown operand kind: {kind}")
+
+            return cls(
+                next_addr=parse_u32(mem, 0x0),
+                op=parse_s16(mem, 0x20),
                 args=args,
             )
         else:
@@ -280,23 +381,19 @@ class MwccBlock:
 
     @classmethod
     def load(cls, addr: int) -> Self:
-        if MWCC_VERSION.name == "GC/1.1":
-            size = 0x20
-            mem = gdb.selected_inferior().read_memory(addr, 0x30)
-            return cls(
-                next_addr=read_u32(addr + 0x0),
-                prev_addr=read_u32(addr + 0x4),
-                label_addr=read_u32(addr + 0x8),
-                predecessors_addr=read_u32(addr + 0xC),
-                successors_addr=read_u32(addr + 0x10),
-                instr_addr=read_u32(addr + 0x14),
-                index=read_s32(addr + 0x1C),
-                loop_weight=read_s32(addr + 0x28),
-                pcode_count=read_s16(addr + 0x2C),
-                flags=read_u16(addr + 0x2E),
-            )
-        else:
-            raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+        mem = gdb.selected_inferior().read_memory(addr, 0x30)
+        return cls(
+            next_addr=parse_u32(mem, 0x0),
+            prev_addr=parse_u32(mem, 0x4),
+            label_addr=parse_u32(mem, 0x8),
+            predecessors_addr=parse_u32(mem, 0xC),
+            successors_addr=parse_u32(mem, 0x10),
+            instr_addr=parse_u32(mem, 0x14),
+            index=parse_s32(mem, 0x1C),
+            loop_weight=parse_s32(mem, 0x28),
+            pcode_count=parse_s16(mem, 0x2C),
+            flags=parse_u16(mem, 0x2E),
+        )
 
 
 @dataclass
@@ -307,15 +404,12 @@ class MwccPCodeLabel:
 
     @classmethod
     def load(cls, addr: int) -> Self:
-        if MWCC_VERSION.name == "GC/1.1":
-            mem = gdb.selected_inferior().read_memory(addr, 0xC)
-            return cls(
-                next_addr=read_u32(addr + 0x0),
-                block_addr=read_u32(addr + 0x4),
-                index=read_u16(addr + 0xA),
-            )
-        else:
-            raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+        mem = gdb.selected_inferior().read_memory(addr, 0xC)
+        return cls(
+            next_addr=parse_u32(mem, 0x0),
+            block_addr=parse_u32(mem, 0x4),
+            index=parse_u16(mem, 0xA),
+        )
 
 
 @dataclass
@@ -326,6 +420,7 @@ class MwccIGNode:
         fCoalescedInto = 2
         fPairHigh = 3
         fPairLow = 4
+        fRematerialized = 5
 
     next_addr: int
     virtual_reg: int
@@ -346,45 +441,56 @@ class MwccIGNode:
             physical_reg = parse_s16(mem, 0x10)
             flags_value = parse_u8(mem, 0x12)
             num_neighbors = parse_s16(mem, 0x14)
-
-            neighbors = []
-            if num_neighbors > 0:
-                mem = gdb.selected_inferior().read_memory(
-                    addr + 0x16, num_neighbors * 0x2
-                )
-                for i in range(num_neighbors):
-                    neighbor = parse_s16(mem, i * 0x2)
-                    neighbors.append(neighbor)
-
-            flags = []
-            if flags_value & 0x01:
-                flags.append(MwccIGNode.Flag.fSpilled)
-            if flags_value & 0x04:
-                flags.append(MwccIGNode.Flag.fCoalesced)
-            if flags_value & 0x08:
-                flags.append(MwccIGNode.Flag.fCoalescedInto)
-            if flags_value & 0x10:
-                flags.append(MwccIGNode.Flag.fPairHigh)
-            if flags_value & 0x20:
-                flags.append(MwccIGNode.Flag.fPairLow)
-
-            if obj_addr != 0:
-                obj = MwccObject.load(obj_addr)
-                obj_name = obj.name
-            else:
-                obj_name = None
-
-            return cls(
-                next_addr=next_addr,
-                virtual_reg=virtual_reg,
-                physical_reg=physical_reg,
-                cost=cost,
-                flags=flags,
-                obj_name=obj_name,
-                neighbors=neighbors,
-            )
+            neighbors_addr = addr + 0x16
+        elif MWCC_VERSION.name == "GC/2.6":
+            mem = gdb.selected_inferior().read_memory(addr, 0x1A)
+            next_addr = parse_u32(mem, 0x0)
+            obj_addr = parse_u32(mem, 0x4)
+            cost = parse_s32(mem, 0xC)
+            virtual_reg = parse_s16(mem, 0x10)
+            physical_reg = parse_s16(mem, 0x14)
+            flags_value = parse_u8(mem, 0x16)
+            num_neighbors = parse_s16(mem, 0x18)
+            neighbors_addr = addr + 0x1A
         else:
             raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+
+        neighbors = []
+        if num_neighbors > 0:
+            mem = gdb.selected_inferior().read_memory(
+                neighbors_addr, num_neighbors * 0x2
+            )
+            for i in range(num_neighbors):
+                neighbor = parse_s16(mem, i * 0x2)
+                neighbors.append(neighbor)
+
+        flags = []
+        if flags_value & 0x01:
+            flags.append(MwccIGNode.Flag.fSpilled)
+        if flags_value & 0x04:
+            flags.append(MwccIGNode.Flag.fCoalesced)
+        if flags_value & 0x08:
+            flags.append(MwccIGNode.Flag.fCoalescedInto)
+        if flags_value & 0x10:
+            flags.append(MwccIGNode.Flag.fPairHigh)
+        if flags_value & 0x20:
+            flags.append(MwccIGNode.Flag.fPairLow)
+
+        if obj_addr != 0:
+            obj = MwccObject.load(obj_addr)
+            obj_name = obj.name
+        else:
+            obj_name = None
+
+        return cls(
+            next_addr=next_addr,
+            virtual_reg=virtual_reg,
+            physical_reg=physical_reg,
+            cost=cost,
+            flags=flags,
+            obj_name=obj_name,
+            neighbors=neighbors,
+        )
 
 
 MWCC_OPCODE_INFO: list[MwccOpcodeInfo] = []
@@ -396,6 +502,8 @@ def load_opcode_info():
 
     if MWCC_VERSION.name == "GC/1.1":
         size = 0x10
+    elif MWCC_VERSION.name == "GC/2.6":
+        size = 0x12
     else:
         raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
 
@@ -525,33 +633,41 @@ def print_regalloc():
     global GPR_PASS, FPR_PASS
 
     assigned_nodes_addr = None
-    pass_number = 0
     pass_name = ""
-    prefix = ""
-    num_regs = 0
 
     # Find out which register class we are processing (GPR or FPR)
+    sp = int(gdb.parse_and_eval("$esp"))
     if MWCC_VERSION.name == "GC/1.1":
-        # Coloring class is first argument, assigned variables is second argument
-        sp = int(gdb.parse_and_eval("$esp"))
+        # For GC/1.1, coloring class is first argument, assigned variables is second argument
         coloring_class = read_u32(sp + 0x4)
         assigned_nodes_addr = read_u32(sp + 0x8)
         if coloring_class == 0:
-            GPR_PASS += 1
-            pass_number = GPR_PASS
-            prefix = "r"
             pass_name = "gpr"
-            num_regs = read_s16(MWCC_VERSION.used_virtual_registers_gpr_addr)
         elif coloring_class == 1:
-            FPR_PASS += 1
-            pass_number = FPR_PASS
             pass_name = "fpr"
-            prefix = "f"
-            num_regs = read_s16(MWCC_VERSION.used_virtual_registers_fpr_addr)
         else:
             raise ValueError(f"Unexpected coloring class: {coloring_class}")
     else:
-        raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+        # For other versions, coloring class is in a global variable, assigned variables is first argument
+        coloring_class = read_u8(MWCC_VERSION.coloring_class_addr)
+        assigned_nodes_addr = read_u32(sp + 0x4)
+        if coloring_class == 4:
+            pass_name = "gpr"
+        elif coloring_class == 3:
+            pass_name = "fpr"
+        else:
+            raise ValueError(f"Unexpected coloring class: {coloring_class}")
+
+    if pass_name == "gpr":
+        GPR_PASS += 1
+        pass_number = GPR_PASS
+        prefix = "r"
+        num_regs = read_s16(MWCC_VERSION.used_virtual_registers_gpr_addr)
+    elif pass_name == "fpr":
+        FPR_PASS += 1
+        pass_number = FPR_PASS
+        prefix = "f"
+        num_regs = read_s16(MWCC_VERSION.used_virtual_registers_fpr_addr)
 
     # Read all interference graph nodes
     graph_addr = read_u32(MWCC_VERSION.interferencegraph_addr)
@@ -657,28 +773,25 @@ def print_variables():
 
 
 def find_current_function() -> MwccObject:
-    if MWCC_VERSION.gfunction_addr is None:
-        # For GC/1.1, there seems to be no global variable for the current function.
-        # Instead, we walk the stack looking for the return address for the callers
-        # of CodeGen_Generator, and inspect the second argument to CodeGen_Generator.
-        if MWCC_VERSION.name == "GC/1.1":
-            stack_start = 0x00111000
-            sp = int(gdb.parse_and_eval("$esp"))
-            mem = gdb.selected_inferior().read_memory(sp, stack_start - sp)
-            for offset in range(0, len(mem), 4):
-                value = parse_u32(mem, offset)
-                if value in (0x50F08B, 0x50F7B2, 0x510080):
-                    # Found a return address for CodeGen_Generator
-                    # The second argument is the current function pointer
-                    current_function_addr = parse_u32(mem, offset + 8)
-                    break
-            else:
-                raise ValueError(f"Could not find current function")
+    # For GC/1.1, there seems to be no global variable for the current function.
+    # Instead, we walk the stack looking for the return address for the callers
+    # of CodeGen_Generator, and inspect the second argument to CodeGen_Generator.
+    if MWCC_VERSION.name == "GC/1.1":
+        stack_start = 0x00111000
+        sp = int(gdb.parse_and_eval("$esp"))
+        mem = gdb.selected_inferior().read_memory(sp, stack_start - sp)
+        for offset in range(0, len(mem), 4):
+            value = parse_u32(mem, offset)
+            if value in (0x50F08B, 0x50F7B2, 0x510080):
+                # Found a return address for CodeGen_Generator
+                # The second argument is the current function pointer
+                current_function_addr = parse_u32(mem, offset + 8)
+                break
         else:
-            raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+            raise ValueError(f"Could not find current function")
     else:
         current_function_addr = read_u32(MWCC_VERSION.gfunction_addr)
-    return MwccObject.load(current_function_addr)
+    return MwccObject.load(current_function_addr, load_linkname=True)
 
 
 def run_compiler():
