@@ -12,10 +12,10 @@ Currently the following MWCC versions are supported:
 
 First, ensure `gdb` and [Rust](https://rustup.rs/) are install.
 
-Next, this project depends on a fork of `retrowin32`, with GDB support by
-@encounter. To build the fork:
+Next, this project depends on @encounter's fork of `retrowin32` with GDB support.
+To build the fork:
 ```bash
-$ git clone https://github.com/cadmic/retrowin32.git
+$ git clone https://github.com/encounter/retrowin32.git
 $ cd retrowin32
 $ git checkout gdb-stub
 $ cargo build -p retrowin32 -F x86-unicorn --profile lto
