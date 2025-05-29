@@ -204,7 +204,10 @@ class MwccPcode:
             mem = gdb.selected_inferior().read_memory(addr, 0x1C)
             flags = parse_u32(mem, 0x16)
             arg_count = parse_s16(mem, 0x1A)
-            arg_mem = gdb.selected_inferior().read_memory(addr + 0x1C, arg_count * 0xC)
+            if arg_count > 0:
+                arg_mem = gdb.selected_inferior().read_memory(
+                    addr + 0x1C, arg_count * 0xC
+                )
 
             args = []
             for i in range(arg_count):
@@ -346,11 +349,14 @@ class MwccIGNode:
             flags_value = parse_u8(mem, 0x12)
             num_neighbors = parse_s16(mem, 0x14)
 
-            mem = gdb.selected_inferior().read_memory(addr + 0x16, num_neighbors * 0x2)
             neighbors = []
-            for i in range(num_neighbors):
-                neighbor = parse_s16(mem, i * 0x2)
-                neighbors.append(neighbor)
+            if num_neighbors > 0:
+                mem = gdb.selected_inferior().read_memory(
+                    addr + 0x16, num_neighbors * 0x2
+                )
+                for i in range(num_neighbors):
+                    neighbor = parse_s16(mem, i * 0x2)
+                    neighbors.append(neighbor)
 
             flags = []
             if flags_value & 0x01:
@@ -552,14 +558,15 @@ def print_regalloc():
 
     # Read all interference graph nodes
     graph_addr = read_u32(MWCC_VERSION.interferencegraph_addr)
-    mem = gdb.selected_inferior().read_memory(graph_addr, num_regs * 0x4)
     nodes = OrderedDict()
-    for i in range(32, num_regs):
-        node_addr = parse_u32(mem, i * 0x4)
-        if node_addr == 0:
-            continue
-        node = MwccIGNode.load(node_addr)
-        nodes[node_addr] = node
+    if num_regs > 0:
+        mem = gdb.selected_inferior().read_memory(graph_addr, num_regs * 0x4)
+        for i in range(32, num_regs):
+            node_addr = parse_u32(mem, i * 0x4)
+            if node_addr == 0:
+                continue
+            node = MwccIGNode.load(node_addr)
+            nodes[node_addr] = node
 
     output_path = Path(OUTPUT_DIR) / f"regalloc-{pass_name}-pass-{pass_number}-all.txt"
     print(f"Dumping all registers to {output_path}")
@@ -677,6 +684,8 @@ def find_current_function() -> MwccObject:
 
 
 def run_compiler():
+    gdb.execute("set python print-stack full")
+
     # Connect to the remote GDB server
     gdb.execute("set architecture i386")
     gdb.execute("set osabi none")
