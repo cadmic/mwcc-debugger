@@ -22,17 +22,17 @@ $ cargo build -p retrowin32 -F x86-unicorn --profile lto
 ```
 The built binary will appear in `target/lto/retrowin32`.
 
-Finally, download `mwcc_debug.py` from this repo (or clone this repo).
+Finally, download `mwcc_debugger.py` from this repo (or clone this repo).
 
 ## Usage
 
 Run it as
 ```
-$ ./mwcc_debug.py -e path/to/retrowin32 -a 'mwcc command line' function_name output_dir
+$ ./mwcc_debugger.py -e path/to/retrowin32 -a 'mwcc command line' function_name output_dir
 ```
 e.g.
 ```
-$ ./mwcc_debug.py -e ../target/lto/retrowin32 -a 'build/compilers/GC/1.1/mwcceppc.exe -nodefaults -proc gekko -O4,p -c source_file.cpp' myfunc__9MyClassFv out
+$ ./mwcc_debugger.py -e ../target/lto/retrowin32 -a 'build/compilers/GC/1.1/mwcceppc.exe -nodefaults -proc gekko -O4,p -c source_file.cpp' myfunc__9MyClassFv out
 ```
 
 To find your compiler command line, you can run `ninja -t commands | grep source_file.cpp`.
