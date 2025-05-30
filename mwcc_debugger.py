@@ -922,7 +922,7 @@ def start_gdb():
         "-batch",
         "-nx",
         "-ex",
-        f"py FUNCTION_NAME = {function_name!r}; OUTPUT_DIR = {output_dir!r}",
+        f"py FUNCTION_NAME = \"{function_name}\"; OUTPUT_DIR = \"{output_dir}\"",
         "-x",
         str(Path(__file__).resolve()),
     ]
