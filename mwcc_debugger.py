@@ -735,8 +735,9 @@ def print_regalloc():
             print("", file=f)
             print(f"  cost: {node.cost}", file=f)
             if node.neighbors:
+                neighbors_str = " ".join(f"{prefix}{i}" for i in sorted(node.neighbors))
                 print(
-                    f"  neighbors: {len(node.neighbors)} ({" ".join(f"{prefix}{i}" for i in sorted(node.neighbors))})",
+                    f"  neighbors: {len(node.neighbors)} ({neighbors_str})",
                     file=f,
                 )
             else:
@@ -779,15 +780,17 @@ def print_regalloc():
                 file=f,
             )
             if prev_neighbors:
+                prev_neighbors_str = " ".join(f"{prefix}{i}" for i in sorted(prev_neighbors))
                 print(
-                    f"  previous neighbors: {len(prev_neighbors)} ({" ".join(f"{prefix}{i}" for i in sorted(prev_neighbors))})",
+                    f"  previous neighbors: {len(prev_neighbors)} ({prev_neighbors_str})",
                     file=f,
                 )
             else:
                 print("  previous neighbors: 0", file=f)
             if node.neighbors:
+                neighbors_str = " ".join(f"{prefix}{i}" for i in sorted(node.neighbors))
                 print(
-                    f"  neighbors: {len(node.neighbors)} ({" ".join(f"{prefix}{i}" for i in sorted(node.neighbors))})",
+                    f"  neighbors: {len(node.neighbors)} ({neighbors_str})",
                     file=f,
                 )
             else:
