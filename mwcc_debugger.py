@@ -782,7 +782,9 @@ def print_regalloc():
                 file=f,
             )
             if prev_neighbors:
-                prev_neighbors_str = " ".join(f"{prefix}{i}" for i in sorted(prev_neighbors))
+                prev_neighbors_str = " ".join(
+                    f"{prefix}{i}" for i in sorted(prev_neighbors)
+                )
                 print(
                     f"  previous neighbors: {len(prev_neighbors)} ({prev_neighbors_str})",
                     file=f,
@@ -927,7 +929,7 @@ def start_gdb():
         "-batch",
         "-nx",
         "-ex",
-        f"py FUNCTION_NAME = \"{function_name}\"; OUTPUT_DIR = \"{output_dir}\"",
+        f'py FUNCTION_NAME = "{function_name}"; OUTPUT_DIR = "{output_dir}"',
         "-x",
         str(Path(__file__).resolve()),
     ]
