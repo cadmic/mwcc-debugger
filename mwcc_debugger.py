@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import argparse
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -9,7 +11,7 @@ import shlex
 import struct
 import subprocess
 import sys
-from typing import Optional, Self
+from typing import Optional
 
 try:
     import gdb
@@ -175,7 +177,7 @@ class MwccObject:
     linkname: Optional[str]
 
     @classmethod
-    def load(cls, addr: int, load_linkname=False) -> Self:
+    def load(cls, addr: int, load_linkname=False) -> MwccObject:
         # Force the linkname to be evaluated by calling CMangler_GetLinkName. Hopefully this
         # doesn't cause any side effects.
         gdb.execute(
@@ -235,7 +237,7 @@ class MwccPcode:
     args: list[MwccPCodeArg]
 
     @classmethod
-    def load(cls, addr: int) -> Self:
+    def load(cls, addr: int) -> MwccPcode:
         if MWCC_VERSION.name == "GC/1.1":
             mem = gdb.selected_inferior().read_memory(addr, 0x1C)
             # flags = parse_u32(mem, 0x16)
@@ -388,7 +390,7 @@ class MwccBlock:
     flags: int  # TODO: parse flags
 
     @classmethod
-    def load(cls, addr: int) -> Self:
+    def load(cls, addr: int) -> MwccBlock:
         if MWCC_VERSION.name == "GC/1.1":
             mem = gdb.selected_inferior().read_memory(addr, 0x30)
             line = parse_s32(mem, 0x20)
@@ -433,7 +435,7 @@ class MwccPCodeLabel:
     index: int
 
     @classmethod
-    def load(cls, addr: int) -> Self:
+    def load(cls, addr: int) -> MwccPCodeLabel:
         mem = gdb.selected_inferior().read_memory(addr, 0xC)
         return cls(
             next_addr=parse_u32(mem, 0x0),
@@ -461,7 +463,7 @@ class MwccIGNode:
     neighbors: list[int]
 
     @classmethod
-    def load(cls, addr: int) -> Self:
+    def load(cls, addr: int) -> MwccIGNode:
         if MWCC_VERSION.name == "GC/1.1":
             mem = gdb.selected_inferior().read_memory(addr, 0x16)
             next_addr = parse_u32(mem, 0x0)
