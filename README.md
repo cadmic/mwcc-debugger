@@ -36,9 +36,12 @@ $ ./mwcc_debugger.py -e ../target/lto/retrowin32 -a 'build/compilers/GC/1.1/mwcc
 ```
 
 To find your compiler command line, you can run `ninja -t commands | grep source_file.cpp`.
-Be sure to remove `wibo`, `sjiswrap`, and/or `transform_dep.py`, and you may
-need to use a different-but-similar MWCC version if your version isn't
-supported.
+It should be the `mwcceppc.exe` command only, i.e without `wibo`, `sjiswrap`,
+and/or `transform_dep.py`.
+
+You may need to use a different-but-similar MWCC version if your version isn't
+supported yet. Adding `-sym on` may be useful too so tbat line numbers can be
+shown in the debugging output.
 
 You can also place `retrowin32` on your `PATH` instead of passing it in manually.
 

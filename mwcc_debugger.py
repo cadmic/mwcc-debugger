@@ -229,6 +229,7 @@ class MwccPCodeArg:
 @dataclass
 class MwccPcode:
     next_addr: int
+    line: Optional[int]
     op: int
     # TODO: flags
     args: list[MwccPCodeArg]
@@ -294,11 +295,16 @@ class MwccPcode:
 
             return cls(
                 next_addr=parse_u32(mem, 0x0),
+                line=None,
                 op=parse_s16(mem, 0x14),
                 args=args,
             )
         elif MWCC_VERSION.name == "GC/2.6":
             mem = gdb.selected_inferior().read_memory(addr, 0x24)
+            line = parse_s32(mem, 0x1C)
+            if line == -1:
+                line = None
+
             arg_count = parse_s16(mem, 0x22)
             if arg_count > 0:
                 arg_mem = gdb.selected_inferior().read_memory(
@@ -359,6 +365,7 @@ class MwccPcode:
 
             return cls(
                 next_addr=parse_u32(mem, 0x0),
+                line=line,
                 op=parse_s16(mem, 0x20),
                 args=args,
             )
@@ -375,25 +382,48 @@ class MwccBlock:
     successors_addr: int
     instr_addr: int
     index: int
+    line: Optional[int]
     loop_weight: int
     pcode_count: int
     flags: int  # TODO: parse flags
 
     @classmethod
     def load(cls, addr: int) -> Self:
-        mem = gdb.selected_inferior().read_memory(addr, 0x30)
-        return cls(
-            next_addr=parse_u32(mem, 0x0),
-            prev_addr=parse_u32(mem, 0x4),
-            label_addr=parse_u32(mem, 0x8),
-            predecessors_addr=parse_u32(mem, 0xC),
-            successors_addr=parse_u32(mem, 0x10),
-            instr_addr=parse_u32(mem, 0x14),
-            index=parse_s32(mem, 0x1C),
-            loop_weight=parse_s32(mem, 0x28),
-            pcode_count=parse_s16(mem, 0x2C),
-            flags=parse_u16(mem, 0x2E),
-        )
+        if MWCC_VERSION.name == "GC/1.1":
+            mem = gdb.selected_inferior().read_memory(addr, 0x30)
+            line = parse_s32(mem, 0x20)
+            if line == -1:
+                line = None
+            return cls(
+                next_addr=parse_u32(mem, 0x0),
+                prev_addr=parse_u32(mem, 0x4),
+                label_addr=parse_u32(mem, 0x8),
+                predecessors_addr=parse_u32(mem, 0xC),
+                successors_addr=parse_u32(mem, 0x10),
+                instr_addr=parse_u32(mem, 0x14),
+                index=parse_s32(mem, 0x1C),
+                line=line,
+                loop_weight=parse_s32(mem, 0x28),
+                pcode_count=parse_s16(mem, 0x2C),
+                flags=parse_u16(mem, 0x2E),
+            )
+        elif MWCC_VERSION.name == "GC/2.6":
+            mem = gdb.selected_inferior().read_memory(addr, 0x2C)
+            return cls(
+                next_addr=parse_u32(mem, 0x0),
+                prev_addr=parse_u32(mem, 0x4),
+                label_addr=parse_u32(mem, 0x8),
+                predecessors_addr=parse_u32(mem, 0xC),
+                successors_addr=parse_u32(mem, 0x10),
+                instr_addr=parse_u32(mem, 0x14),
+                index=parse_s32(mem, 0x1C),
+                line=None,
+                loop_weight=parse_s32(mem, 0x24),
+                pcode_count=parse_s16(mem, 0x28),
+                flags=parse_u16(mem, 0x2A),
+            )
+        else:
+            raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
 
 
 @dataclass
@@ -570,12 +600,14 @@ def format_operands(instr) -> str:
     return out
 
 
-def print_instruction(f, instr: MwccPcode):
+def print_instruction(f, instr: MwccPcode, block_line_number: Optional[int]):
     operands = format_operands(instr)
     # TODO: show "record" bit as dot
     mnemonic = MWCC_OPCODE_INFO[instr.op].mnemonic.lower()
-    # TODO: print offset or source location?
-    print(f"  {mnemonic:<8} {operands}", file=f)
+
+    line_number = instr.line or block_line_number
+    line_number_str = f"{line_number:>5}" if line_number else "     "
+    print(f" {line_number_str}  {mnemonic:<8} {operands}", file=f)
 
 
 def print_block(f, block: MwccBlock):
@@ -607,7 +639,7 @@ def print_block(f, block: MwccBlock):
     instr_addr = block.instr_addr
     while instr_addr != 0:
         instr = MwccPcode.load(instr_addr)
-        print_instruction(f, instr)
+        print_instruction(f, instr, block.line)
         instr_addr = instr.next_addr
 
     print("", file=f)
@@ -810,12 +842,12 @@ def run_compiler():
     while True:
         gdb.execute("continue")
         func = find_current_function()
-        print(f"Skipping function {func.linkname}")
         if func.linkname == FUNCTION_NAME:
             break
+        print(f"Skipping function {func.linkname}")
 
-    print()
     print(f"Found function {func.linkname}")
+    print()
 
     # Set breakpoints
     gdb.execute(f"break *{MWCC_VERSION.codegen_end_addr:#x}")
