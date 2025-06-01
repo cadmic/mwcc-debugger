@@ -180,3 +180,23 @@ influence that by reordering things (e.g. making something a compiler temp
 instead of a real variable, moving variables to inline functions, etc.) or
 adding/removing neighbors to move variables between different "levels" (e.g. by
 created new "coalesced" variables).
+
+### Stack allocation
+
+On versions GC/1.0 - GC/1.2.5, the compiler allocates stack space in the
+following order (from low addresses to high):
+
+* 8 bytes for the callee to save `r0` and `r1` (if this function calls other functions)
+* Space for arguments passed on the stack to called functions (if this function calls other functions)
+* This function's arguments (whether they are assigned a register or not)
+* Local variables (including frontend temps) that are not assigned a register before regalloc
+* Spilled variables from regalloc
+* Temporary variables from backend code generation (not totally sure what these are)
+
+Unlike in later MWCC versions, the compiler does not attempt remove unused stack
+space. So local variables will still be allocated stack space if they are unused
+or optimized out before backend code generation, since in this case they will
+not be assigned a register.
+
+For GC/1.1, stack allocations for all variables are dumped to `variables.txt`.
+This is currently not implemented for GC/2.6.

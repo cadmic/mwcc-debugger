@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from collections import OrderedDict
+from collections import defaultdict, OrderedDict
 from dataclasses import dataclass
 from enum import Enum
 import os
@@ -123,6 +123,16 @@ class MwccVersion:
     used_virtual_registers_fpr_addr: int
     # Address of coloring_class
     coloring_class_addr: Optional[int]
+    # Address of arguments list
+    arguments_addr: Optional[int]
+    # Address of locals list
+    locals_addr: Optional[int]
+    # Address of temps list
+    temps_addr: Optional[int]
+    # Address of frame base size (for r0/r1)
+    frame_base_size_addr: Optional[int]
+    # Address of frame call args size (for stack arguments to called functions)
+    frame_call_args_size_addr: Optional[int]
 
 
 MWCC_VERSION: MwccVersion = None
@@ -203,6 +213,11 @@ def init_mwcc_version():
             used_virtual_registers_gpr_addr=0x588C72,
             used_virtual_registers_fpr_addr=0x588C70,
             coloring_class_addr=None,
+            arguments_addr=0x58886C,
+            locals_addr=0x5887B8,
+            temps_addr=0x5806C0,
+            frame_base_size_addr=0x5888CC,
+            frame_call_args_size_addr=0x58792C,
         )
     elif bytes(gdb.selected_inferior().read_memory(0x58D224, 10)) == b"Metrowerks":
         MWCC_VERSION = MwccVersion(
@@ -281,6 +296,11 @@ def init_mwcc_version():
             used_virtual_registers_gpr_addr=0x5EAA3C,
             used_virtual_registers_fpr_addr=0x5EAA38,
             coloring_class_addr=0x5EB2CF,
+            arguments_addr=None,
+            locals_addr=None,
+            temps_addr=None,
+            frame_base_size_addr=None,
+            frame_call_args_size_addr=None,
         )
     else:
         raise ValueError("Unsupported MWCC version or not an MWCC binary")
@@ -290,18 +310,27 @@ def init_mwcc_version():
 @dataclass
 class MwccObject:
     name: str
+    stack_offset: int
+    size: int
     linkname: Optional[str]
 
     @classmethod
     def load(cls, addr: int, load_linkname=False) -> MwccObject:
-        # Force the linkname to be evaluated by calling CMangler_GetLinkName. Hopefully this
-        # doesn't cause any side effects.
-        gdb.execute(
-            f"call ((void (*) (void *)) {MWCC_VERSION.cmangler_getlinkname_addr:#x})({addr:#x})"
-        )
+        if load_linkname:
+            # Force the linkname to be evaluated by calling CMangler_GetLinkName. Hopefully this
+            # doesn't cause any side effects.
+            gdb.execute(
+                f"call ((void (*) (void *)) {MWCC_VERSION.cmangler_getlinkname_addr:#x})({addr:#x})"
+            )
         mem = gdb.selected_inferior().read_memory(addr, 0x36)
         datatype = parse_u8(mem, 0x2)
         name = read_string(parse_u32(mem, 0xA) + 0xA)
+        stack_offset = parse_s32(mem, 0x2A)
+        type_ = parse_u32(mem, 0xE)
+        if type_ != 0:
+            size = read_s32(type_ + 0x2)
+        else:
+            size = 0
         if load_linkname and datatype in (3, 4):  # FUNC, VFUNC
             if MWCC_VERSION.name == "GC/1.1":
                 offset = 0x2E
@@ -314,6 +343,8 @@ class MwccObject:
             linkname = None
         return cls(
             name=name,
+            stack_offset=stack_offset,
+            size=size,
             linkname=linkname,
         )
 
@@ -1112,7 +1143,7 @@ class MwccIGNode:
     physical_reg: int
     cost: int
     flags: list[Flag]
-    obj_name: Optional[str]
+    obj_addr: int
     neighbors: list[int]
 
     @classmethod
@@ -1161,19 +1192,13 @@ class MwccIGNode:
         if flags_value & 0x20:
             flags.append(MwccIGNode.Flag.fPairLow)
 
-        if obj_addr != 0:
-            obj = MwccObject.load(obj_addr)
-            obj_name = obj.name
-        else:
-            obj_name = None
-
         return cls(
             next_addr=next_addr,
             virtual_reg=virtual_reg,
             physical_reg=physical_reg,
             cost=cost,
             flags=flags,
-            obj_name=obj_name,
+            obj_addr=obj_addr,
             neighbors=neighbors,
         )
 
@@ -1311,15 +1336,40 @@ def print_pcode(pass_number: int, pass_name: str):
             block_addr = block.next_addr
 
 
-GPR_PASS = 0
-FPR_PASS = 0
+class RegType(Enum):
+    GPR = 0
+    FPR = 1
+
+
+def reg_name(reg: int, reg_type: RegType) -> str:
+    if reg == -1:
+        return "none"
+    elif reg_type == RegType.GPR:
+        return f"r{reg}"
+    elif reg_type == RegType.FPR:
+        return f"f{reg}"
+    else:
+        raise ValueError(f"Unknown register type: {reg_type}")
+
+
+@dataclass
+class RegallocObject:
+    reg_type: RegType
+    virtual_reg: int
+    physical_reg: int
+
+
+REGALLOC_PASS = defaultdict[RegType, int](lambda: 0)
+# Objects from regalloc nodes. New objects from regalloc spills don't seem to be stored
+# anywhere else so we collect them here.
+POTENTIAL_SPILLS = []
+# Variable information collected during regalloc
+REGALLOC_OBJECTS: dict[int, RegallocObject] = {}
 
 
 def print_regalloc():
-    global GPR_PASS, FPR_PASS
-
     assigned_nodes_addr = None
-    pass_name = ""
+    reg_type = None
 
     # Find out which register class we are processing (GPR or FPR)
     sp = int(gdb.parse_and_eval("$esp"))
@@ -1328,9 +1378,9 @@ def print_regalloc():
         coloring_class = read_u32(sp + 0x4)
         assigned_nodes_addr = read_u32(sp + 0x8)
         if coloring_class == 0:
-            pass_name = "gpr"
+            reg_type = RegType.GPR
         elif coloring_class == 1:
-            pass_name = "fpr"
+            reg_type = RegType.FPR
         else:
             raise ValueError(f"Unexpected coloring class: {coloring_class}")
     else:
@@ -1338,21 +1388,18 @@ def print_regalloc():
         coloring_class = read_u8(MWCC_VERSION.coloring_class_addr)
         assigned_nodes_addr = read_u32(sp + 0x4)
         if coloring_class == 4:
-            pass_name = "gpr"
+            reg_type = RegType.GPR
         elif coloring_class == 3:
-            pass_name = "fpr"
+            reg_type = RegType.FPR
         else:
             raise ValueError(f"Unexpected coloring class: {coloring_class}")
 
-    if pass_name == "gpr":
-        GPR_PASS += 1
-        pass_number = GPR_PASS
-        prefix = "r"
+    REGALLOC_PASS[reg_type] += 1
+    pass_number = REGALLOC_PASS[reg_type]
+    pass_name = reg_type.name.lower()
+    if reg_type == RegType.GPR:
         num_regs = read_s16(MWCC_VERSION.used_virtual_registers_gpr_addr)
-    elif pass_name == "fpr":
-        FPR_PASS += 1
-        pass_number = FPR_PASS
-        prefix = "f"
+    elif reg_type == RegType.FPR:
         num_regs = read_s16(MWCC_VERSION.used_virtual_registers_fpr_addr)
 
     # Read all interference graph nodes
@@ -1366,22 +1413,26 @@ def print_regalloc():
                 continue
             node = MwccIGNode.load(node_addr)
             nodes[node_addr] = node
+            if node.obj_addr != 0:
+                POTENTIAL_SPILLS.append(node.obj_addr)
+                REGALLOC_OBJECTS[node.obj_addr] = RegallocObject(
+                    reg_type=reg_type,
+                    virtual_reg=node.virtual_reg,
+                    physical_reg=node.physical_reg,
+                )
 
     output_path = Path(OUTPUT_DIR) / f"regalloc-{pass_name}-pass-{pass_number}-all.txt"
     print(f"Dumping all registers to {output_path}")
     with open(output_path, "w") as f:
         for node in nodes.values():
-            if node.physical_reg == -1:
-                physical_reg = "fSpilled"
-            else:
-                physical_reg = f"{prefix}{node.physical_reg}"
             print(
-                f"{prefix}{node.virtual_reg} -> {physical_reg}",
+                f"{reg_name(node.virtual_reg, reg_type)} -> {reg_name(node.physical_reg, reg_type)}",
                 file=f,
                 end="",
             )
-            if node.obj_name:
-                print(f" {node.obj_name}", file=f, end="")
+            if node.obj_addr:
+                obj = MwccObject.load(node.obj_addr)
+                print(f" { obj.name}", file=f, end="")
             print("", file=f)
             print(f"  flags:", file=f, end="")
             for flag in node.flags:
@@ -1389,7 +1440,9 @@ def print_regalloc():
             print("", file=f)
             print(f"  cost: {node.cost}", file=f)
             if node.neighbors:
-                neighbors_str = " ".join(f"{prefix}{i}" for i in sorted(node.neighbors))
+                neighbors_str = " ".join(
+                    reg_name(i, reg_type) for i in sorted(node.neighbors)
+                )
                 print(
                     f"  neighbors: {len(node.neighbors)} ({neighbors_str})",
                     file=f,
@@ -1412,17 +1465,14 @@ def print_regalloc():
             prev_neighbors = set(node.neighbors)
             for j in range(i, len(assigned_nodes)):
                 prev_neighbors.discard(assigned_nodes[j].virtual_reg)
-            if node.physical_reg == -1:
-                physical_reg = "fSpilled"
-            else:
-                physical_reg = f"{prefix}{node.physical_reg}"
             print(
-                f"{prefix}{node.virtual_reg} -> {physical_reg}",
+                f"{reg_name(node.virtual_reg, reg_type)} -> {reg_name(node.physical_reg, reg_type)}",
                 file=f,
                 end="",
             )
-            if node.obj_name:
-                print(f" {node.obj_name}", file=f, end="")
+            if node.obj_addr:
+                obj = MwccObject.load(node.obj_addr)
+                print(f" {obj.name}", file=f, end="")
             print("", file=f)
             print(f"  flags:", file=f, end="")
             for flag in node.flags:
@@ -1435,7 +1485,7 @@ def print_regalloc():
             )
             if prev_neighbors:
                 prev_neighbors_str = " ".join(
-                    f"{prefix}{i}" for i in sorted(prev_neighbors)
+                    reg_name(i, reg_type) for i in sorted(prev_neighbors)
                 )
                 print(
                     f"  previous neighbors: {len(prev_neighbors)} ({prev_neighbors_str})",
@@ -1444,7 +1494,9 @@ def print_regalloc():
             else:
                 print("  previous neighbors: 0", file=f)
             if node.neighbors:
-                neighbors_str = " ".join(f"{prefix}{i}" for i in sorted(node.neighbors))
+                neighbors_str = " ".join(
+                    reg_name(i, reg_type) for i in sorted(node.neighbors)
+                )
                 print(
                     f"  neighbors: {len(node.neighbors)} ({neighbors_str})",
                     file=f,
@@ -1453,14 +1505,85 @@ def print_regalloc():
                 print("  neighbors: 0", file=f)
 
 
+def load_object_list(list_addr: int) -> list[int]:
+    node_addr = read_u32(list_addr)
+    obj_addrs = []
+    while node_addr != 0:
+        mem = gdb.selected_inferior().read_memory(node_addr, 0x8)
+        obj_addrs.append(parse_u32(mem, 0x4))
+        node_addr = parse_u32(mem, 0x0)
+    return obj_addrs
+
+
+def print_objects(f, stack_base: int, objects: list[int], is_locals=False):
+    for obj_addr in reversed(objects):
+        obj = MwccObject.load(obj_addr)
+
+        if MWCC_VERSION.name == "GC/1.1":
+            # On GC/1.1, everything is allocated a stack address, except for locals who have a register
+            if is_locals and obj_addr in REGALLOC_OBJECTS:
+                has_stack = False
+            else:
+                has_stack = True
+        else:
+            raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+
+        if has_stack:
+            stack_str = f"r1+0x{stack_base + obj.stack_offset:04x}-0x{stack_base + obj.stack_offset + obj.size:04x} "
+        else:
+            stack_str = ""
+
+        if obj_addr in REGALLOC_OBJECTS:
+            regalloc_obj = REGALLOC_OBJECTS[obj_addr]
+            reg_type = regalloc_obj.reg_type
+            virtual_reg = regalloc_obj.virtual_reg
+            physical_reg = regalloc_obj.physical_reg
+            register_str = f"  {reg_name(virtual_reg, reg_type).rjust(4)} -> {reg_name(physical_reg, reg_type).rjust(4)}   "
+        else:
+            register_str = ""
+
+        print(
+            f"  {stack_str}{register_str}{obj.name}",
+            file=f,
+        )
+
+
 def print_variables():
-    # TODO: implement
-    pass
-    # output_file = "variables.txt"
-    # output_path = Path(OUTPUT_DIR) / output_file
-    # print(f"Dumping variables to {output_path}")
-    # with open(output_path, "w") as f:
-    #     pass
+    if not MWCC_VERSION.name == "GC/1.1":
+        # TODO: implement other versions
+        return
+
+    output_file = "variables.txt"
+    output_path = Path(OUTPUT_DIR) / output_file
+    print(f"Dumping variables to {output_path}")
+    with open(output_path, "w") as f:
+        stack_base = read_u32(MWCC_VERSION.frame_base_size_addr) + read_u32(
+            MWCC_VERSION.frame_call_args_size_addr
+        )
+
+        arguments = load_object_list(MWCC_VERSION.arguments_addr)
+        locals_ = load_object_list(MWCC_VERSION.locals_addr)
+        temps = load_object_list(MWCC_VERSION.temps_addr)
+
+        spills = []
+        for obj_addr in POTENTIAL_SPILLS:
+            if (
+                obj_addr in arguments
+                or obj_addr in locals_
+                or obj_addr in temps
+                or obj_addr in spills
+            ):
+                continue
+            spills.append(obj_addr)
+
+        print("temps:", file=f)
+        print_objects(f, stack_base, temps)
+        print("spills:", file=f)
+        print_objects(f, stack_base, spills)
+        print("locals:", file=f)
+        print_objects(f, stack_base, locals_, is_locals=True)
+        print("arguments:", file=f)
+        print_objects(f, stack_base, arguments)
 
 
 def find_current_function() -> MwccObject:
