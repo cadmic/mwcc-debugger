@@ -94,7 +94,9 @@ class MwccVersion:
     opcodeinfo_size: int
     # Address of pcbasicblocks
     pcbasicblocks_addr: int
-    # Breakpoint addresses for dumping pcode, with the names of output files
+    # Breakpoint addresses for dumping pcode, with the names of backend passes
+    # Many pass names set a flag indicating that the pass actually did anything. If so,
+    # this breakpoint should be just after that flag is checked.
     pcode_breakpoints: dict[int, str]
     # Breakpoint for regalloc, at the end of colorgraph()
     regalloc_breakpoint_addr: int
@@ -125,14 +127,58 @@ def init_mwcc_version():
             opcodeinfo_size=468,
             pcbasicblocks_addr=0x588474,
             pcode_breakpoints={
-                0x435AF4: "backend-00-initial-code.txt",
-                0x435B69: "backend-01-before-scheduling.txt",
-                0x435B6E: "backend-02-after-scheduling.txt",
-                0x435BEE: "backend-03-before-regalloc.txt",
-                0x435BF3: "backend-04-after-regalloc.txt",
-                0x435D60: "backend-05-before-final-scheduling.txt",
-                0x435D65: "backend-06-after-final-scheduling.txt",
-                0x435DA9: "backend-07-final-code.txt",
+                0x435AEF: "initial-code",
+                # -O2
+                0x4C4B96: "after-common-subexpression-elimination",
+                0x4C4BC9: "after-copy-propagation",
+                0x4C4BF9: "after-add-propagation",
+                # -O3
+                0x4C5036: "after-common-subexpression-elimination",
+                0x4C5069: "after-copy-propagation",
+                0x4C50A3: "after-add-propagation",
+                0x4C5106: "after-loop-code-motion",
+                0x4C5136: "after-loop-strength-reduction",
+                0x4C513D: "after-copy-propagation",
+                0x4C516E: "after-loop-transforms",
+                0x4C5175: "after-copy-propagation",
+                0x4C517B: "after-add-propagation",
+                0x4C51B7: "after-copy-propagation",
+                0x4C51EB: "after-constant-propagation",
+                0x4C521B: "after-load-deletion",
+                0x4C524B: "after-add-propagation",
+                0x4C527E: "after-common-subexpression-elimination",
+                0x4C5285: "after-copy-propagation",
+                # -O4
+                0x4C4C56: "after-common-subexpression-elimination",
+                0x4C4C89: "after-copy-propagation",
+                0x4C4CC3: "after-add-propagation",
+                0x4C4D26: "after-loop-code-motion",
+                0x4C4D56: "after-loop-strength-reduction",
+                0x4C4D5D: "after-copy-propagation",
+                0x4C4D8E: "after-loop-transforms",
+                0x4C4D95: "after-copy-propagation",
+                0x4C4D9B: "after-add-propagation",
+                0x4C4DD7: "after-copy-propagation",
+                0x4C4E0B: "after-constant-propagation",
+                0x4C4E3B: "after-load-deletion",
+                0x4C4E6D: "after-copy-propagation",
+                0x4C4E7C: "after-add-propagation",
+                0x4C4EB5: "after-array-register-transforms",
+                0x4C4EE5: "after-constant-propagation",
+                0x4C4EEC: "after-copy-propagation",
+                0x4C4F1D: "after-common-subexpression-elimination",
+                0x4C4F27: "after-copy-propagation",
+                0x4C4FBB: "after-code-motion",
+                0x4C4FEE: "after-common-subexpression-elimination",
+                0x4C4FF5: "after-copy-propagation",
+                # Shared passes
+                0x435B6E: "after-scheduling",
+                0x435BCA: "after-peephole-forward",
+                0x435BEE: "before-regalloc",
+                0x435BF3: "after-regalloc",
+                0x435CA8: "after-prologue-epilogue",
+                0x435D10: "after-peephole",
+                0x435D65: "after-scheduling",
             },
             regalloc_breakpoint_addr=0x4CEB04,
             interferencegraph_addr=0x58863C,
@@ -151,14 +197,63 @@ def init_mwcc_version():
             opcodeinfo_size=471,
             pcbasicblocks_addr=0x5EA748,
             pcode_breakpoints={
-                0x433D77: "backend-00-initial-code.txt",
-                0x433E07: "backend-01-before-scheduling.txt",
-                0x433E0C: "backend-02-after-scheduling.txt",
-                0x433EA6: "backend-03-before-regalloc.txt",
-                0x433EAB: "backend-04-after-regalloc.txt",
-                0x43405E: "backend-05-before-final-scheduling.txt",
-                0x434063: "backend-06-after-final-scheduling.txt",
-                0x4340B1: "backend-07-final-code.txt",
+                0x433CF5: "initial-code",
+                # -O2
+                0x50054E: "after-common-subexpression-elimination",
+                0x500576: "after-copy-propagation",
+                0x50057E: "after-add-propagation",
+                # -O3
+                0x500981: "after-peephole-forward",
+                0x5009B4: "after-common-subexpression-elimination",
+                0x5009DC: "after-copy-propagation",
+                0x5009EE: "after-add-propagation",
+                0x500A1C: "after-loop-code-motion",
+                0x500A5E: "after-loop-strength-reduction",
+                0x500A86: "after-copy-propagation",
+                0x500A96: "after-loop-transforms",
+                0x500ABE: "after-copy-propagation",
+                0x500AC1: "after-add-propagation",
+                0x500AE3: "after-copy-propagation",
+                0x500B11: "after-constant-propagation",
+                0x500B37: "after-load-deletion",
+                0x500B3E: "after-add-propagation",
+                0x500B6B: "after-peephole-forward",
+                0x500B9E: "after-common-subexpression-elimination",
+                0x500BC6: "after-copy-propagation",
+                # -O4
+                0x5005D0: "after-peephole-forward",
+                0x500604: "after-common-subexpression-elimination",
+                0x50062C: "after-copy-propagation",
+                0x50063E: "after-add-propagation",
+                0x50066C: "after-loop-code-motion",
+                0x5006AE: "after-loop-strength-reduction",
+                0x5006D6: "after-copy-propagation",
+                0x5006F0: "after-loop-transforms",
+                0x500718: "after-copy-propagation",
+                0x500720: "after-add-propagation",
+                0x500732: "after-copy-propagation",
+                0x500746: "after-constant-propagation",
+                0x50076C: "after-load-deletion",
+                0x50077E: "after-copy-propagation",
+                0x500786: "after-add-propagation",
+                0x50079E: "after-array-register-transforms",
+                0x5007C3: "after-constant-propagation",
+                0x5007F4: "after-copy-propagation",
+                0x500822: "after-peephole-forward",
+                0x500855: "after-common-subexpression-elimination",
+                0x50087D: "after-copy-propagation",
+                0x5008F0: "after-code-motion",
+                0x500923: "after-common-subexpression-elimination",
+                0x50094B: "after-copy-propagation",
+                # Shared passes
+                0x433E0C: "after-scheduling",
+                0x433E79: "after-peephole-forward",
+                0x433EA6: "before-regalloc",
+                0x433EAB: "after-regalloc",
+                0x433EFD: "after-common-subexpression-elimination",
+                0x433F8C: "after-prologue-epilogue",
+                0x434006: "after-peephole",
+                0x434063: "after-scheduling.txt",
             },
             regalloc_breakpoint_addr=0x5089A9,
             interferencegraph_addr=0x5EA768,
@@ -647,11 +742,11 @@ def print_block(f, block: MwccBlock):
     print("", file=f)
 
 
-def print_pcode(output_file: str):
+def print_pcode(pass_number: int, pass_name: str):
     load_opcode_info()
-    output_path = Path(OUTPUT_DIR) / output_file
+    output_path = Path(OUTPUT_DIR) / f"backend-{pass_number:02}-{pass_name}.txt"
     print(f"Dumping PCode to {output_path}")
-    with open(Path(OUTPUT_DIR) / output_file, "w") as f:
+    with open(output_path, "w") as f:
         block_addr = read_u32(MWCC_VERSION.pcbasicblocks_addr)
         while block_addr != 0:
             block = MwccBlock.load(block_addr)
@@ -864,13 +959,15 @@ def run_compiler():
         gdb.execute(f"break *{addr:#x}")
 
     # Loop through breakpoints
+    backend_pass_number = 0
     while True:
         gdb.execute("continue")
         current_addr = int(gdb.parse_and_eval("$pc"))
 
         if current_addr in MWCC_VERSION.pcode_breakpoints:
-            output_file = MWCC_VERSION.pcode_breakpoints[current_addr]
-            print_pcode(output_file)
+            pass_name = MWCC_VERSION.pcode_breakpoints[current_addr]
+            print_pcode(backend_pass_number, pass_name)
+            backend_pass_number += 1
 
         if current_addr == MWCC_VERSION.regalloc_breakpoint_addr:
             print_regalloc()
