@@ -935,10 +935,7 @@ def start_gdb():
     ]
     print(f"GDB command: {shlex.join(gdb_command)}", file=sys.stderr)
 
-    # TODO: The retrowin32 GDB stub is really noisy. Can we disable debug logging instead of hiding its output?
-    emulator_process = subprocess.Popen(
-        emulator_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
+    emulator_process = subprocess.Popen(emulator_command)
     subprocess.run(gdb_command, check=True)
 
     emulator_process.wait(timeout=10)
