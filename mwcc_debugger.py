@@ -11,7 +11,7 @@ import shlex
 import struct
 import subprocess
 import sys
-from typing import Optional
+from typing import Optional, Tuple
 
 try:
     import gdb
@@ -46,6 +46,14 @@ def parse_u32(mem: memoryview, offset: int) -> int:
     return int.from_bytes(mem[offset : offset + 4], "little", signed=False)
 
 
+def parse_f32(mem: memoryview, offset: int) -> float:
+    return struct.unpack("<f", mem[offset : offset + 4])[0]
+
+
+def parse_f64(mem: memoryview, offset: int) -> float:
+    return struct.unpack("<d", mem[offset : offset + 8])[0]
+
+
 # Helpers for reading memory
 def read_s8(addr: int) -> int:
     return parse_s8(gdb.selected_inferior().read_memory(addr, 1), 0)
@@ -73,7 +81,8 @@ def read_u32(addr: int) -> int:
 
 # Read a C string
 def read_string(addr: int) -> str:
-    return gdb.Value(addr).cast(gdb.lookup_type("char").pointer()).string()
+    # TODO: We should probably use raw bytes and not a Unicode string
+    return gdb.Value(addr).cast(gdb.lookup_type("char").pointer()).string("latin-1")
 
 
 @dataclass
@@ -88,6 +97,12 @@ class MwccVersion:
     gfunction_addr: Optional[int]
     # Address of CMangler_GetLinkName()
     cmangler_getlinkname_addr: int
+    # Address of nodenames array in DumpExpression()
+    nodenames_addr: int
+    # Number of entries in nodenames array
+    nodenames_size: int
+    # Breakpoint address for call to COpt_Optimizer()
+    copt_optimizer_call_addr: int
     # Address of opcode info table
     opcodeinfo_addr: int
     # Number of entries in the opcode info table
@@ -123,6 +138,9 @@ def init_mwcc_version():
             codegen_end_addr=0x435DA9,
             gfunction_addr=None,
             cmangler_getlinkname_addr=0x4C2C70,
+            nodenames_addr=0x561CB4,
+            nodenames_size=75,
+            copt_optimizer_call_addr=0x43538E,
             opcodeinfo_addr=0x5664B0,
             opcodeinfo_size=468,
             pcbasicblocks_addr=0x588474,
@@ -193,6 +211,9 @@ def init_mwcc_version():
             codegen_end_addr=0x4340B1,
             gfunction_addr=0x05E9EC0,
             cmangler_getlinkname_addr=0x4FE6A0,
+            nodenames_addr=0x5BC980,
+            nodenames_size=77,
+            copt_optimizer_call_addr=0x43356D,
             opcodeinfo_addr=0x5C0FA8,
             opcodeinfo_size=471,
             pcbasicblocks_addr=0x5EA748,
@@ -295,6 +316,538 @@ class MwccObject:
             name=name,
             linkname=linkname,
         )
+
+
+TYPE_CACHE: dict[str, MwccType] = {}
+
+
+@dataclass
+class MwccType:
+    type_type: int
+    size: int
+    integral: Optional[int] = None  # For TYPEINT, TYPEFLOAT
+    name: Optional[str] = None
+    target: Optional[MwccType] = None
+    offset: Optional[int] = None  # For TYPEBITFIELD
+    bitlength: Optional[int] = None  # For TYPEBITFIELD
+    scope: Optional[MwccType] = None  # For TYPEMEMBERPOINTER
+    # TODO
+    pass
+
+    @classmethod
+    def load(cls, addr: int) -> MwccType:
+        if addr in TYPE_CACHE:
+            return TYPE_CACHE[addr]
+
+        mem = gdb.selected_inferior().read_memory(addr, 0x16)
+        type_type = parse_s8(mem, 0x0)
+        size = parse_u32(mem, 0x2)
+
+        if type_type in (-1, 0, 8):  # TYPEILLEGAL, TYPEVOID, TYPELABEL
+            rtype = cls(
+                type_type=type_type,
+                size=size,
+            )
+        elif type_type in (1, 2):  # TYPEINT, TYPEFLOAT
+            integral = parse_u8(mem, 0x6)
+            rtype = cls(
+                type_type=type_type,
+                size=size,
+                integral=integral,
+            )
+        elif type_type in (3, 4, 5):  # TYPEENUM, TYPESTRUCT, TYPECLASS
+            if type_type == 3:  # TYPEENUM
+                name_addr = parse_u32(mem, 0x12)
+            elif type_type == 4:  # TYPESTRUCT
+                name_addr = parse_u32(mem, 0x6)
+            elif type_type == 5:  # TYPECLASS
+                name_addr = parse_u32(mem, 0xA)
+            if name_addr == 0:
+                name = None
+            else:
+                name = read_string(name_addr + 0xA)
+            rtype = cls(
+                type_type=type_type,
+                size=size,
+                name=name,
+            )
+        elif type_type == 6:  # TYPEFUNC
+            target = MwccType.load(parse_u32(mem, 0xE))
+            rtype = cls(
+                type_type=type_type,
+                size=size,
+                target=target,
+            )
+        elif type_type == 7:  # TYPEBITFIELD
+            target = MwccType.load(parse_u32(mem, 0x6))
+            offset = parse_s8(mem, 0xA)
+            bitlength = parse_s8(mem, 0xB)
+            rtype = cls(
+                type_type=type_type,
+                size=size,
+                target=target,
+                offset=offset,
+                bitlength=bitlength,
+            )
+        elif type_type == 10:  # TYPEMEMBERPOINTER
+            scope = MwccType.load(parse_u32(mem, 0xA))
+            target = MwccType.load(parse_u32(mem, 0x6))
+            rtype = cls(
+                type_type=type_type,
+                size=size,
+                scope=scope,
+                target=target,
+            )
+        elif type_type in (11, 12):  # TYPEPOINTER, TYPEARRAY
+            target = MwccType.load(parse_u32(mem, 0x6))
+            rtype = cls(
+                type_type=type_type,
+                size=size,
+                target=target,
+            )
+        else:
+            raise ValueError(f"Unknown type: {type_type}")
+
+        TYPE_CACHE[addr] = rtype
+        return rtype
+
+
+INTEGRAL_NAMES: list[str] = [
+    "bool",
+    "char",
+    "signed char",
+    "unsigned char",
+    "wchar_t",
+    "short",
+    "unsigned short",
+    "int",
+    "unsigned int",
+    "long",
+    "unsigned long",
+    "long long",
+    "unsigned long long",
+    "float",
+    "short double",
+    "double",
+    "long double",
+]
+
+
+def format_type(rtype: MwccType) -> str:
+    type_type = rtype.type_type
+    if type_type == -1:  # TYPEILLEGAL
+        return "illegal"
+    elif type_type == 0:  # TYPEVOID
+        return "void"
+    elif type_type in (1, 2):  # TYPEINT, TYPEFLOAT
+        return INTEGRAL_NAMES[rtype.integral]
+    elif type_type == 3:  # TYPEENUM
+        name = rtype.name if rtype.name else "<anonymous>"
+        return f"enum {name}"
+    elif type_type == 4:  # TYPESTRUCT
+        name = rtype.name if rtype.name else "<anonymous>"
+        return f"struct {name}"
+    elif type_type == 5:  # TYPECLASS
+        name = rtype.name if rtype.name else "<anonymous>"
+        return f"class {name}"
+    elif type_type == 6:  # TYPEFUNC
+        return f"freturns({format_type(rtype.target)})"
+    elif type_type == 7:  # TYPEBITFIELD
+        return (
+            f"bitfield({format_type(rtype.target)}){{{rtype.offset}:{rtype.bitlength}}}"
+        )
+    elif type_type == 8:  # TYPELABEL
+        return "label"
+    elif type_type == 10:  # TYPEMEMBERPOINTER
+        return f"memberpointer({format_type(rtype.scope)},{format_type(rtype.target)})"
+    elif type_type == 11:  # TYPEPOINTER
+        return f"pointer({format_type(rtype.target)})"
+    elif type_type == 12:  # TYPEARRAY
+        return f"array({format_type(rtype.target)})"
+    else:
+        raise ValueError(f"Unknown type: {type_type}")
+
+
+NODE_NAMES: list[str] = []
+
+
+def load_node_names():
+    if NODE_NAMES:
+        return
+
+    mem = gdb.selected_inferior().read_memory(
+        MWCC_VERSION.nodenames_addr, MWCC_VERSION.nodenames_size * 0x4
+    )
+    for i in range(MWCC_VERSION.nodenames_size):
+        str_addr = parse_u32(mem, i * 0x4)
+        NODE_NAMES.append(read_string(str_addr))
+
+
+@dataclass
+class MwccENode:
+    expr_type: str
+    rtype: MwccType
+    # Child expressions
+    children: list[MwccENode]
+    # Constants
+    int_const: Optional[int] = None  # For EINTCONST
+    float_const: Optional[float] = None  # For EFLOATCONST
+    string_const: Optional[str] = None  # For ESTRINGCONST
+    name: Optional[str] = None  # For EOBJREF, ELABEL
+
+    @classmethod
+    def load(cls, addr: int) -> MwccENode:
+        mem = gdb.selected_inferior().read_memory(addr, 0x1A)
+        expr_type = NODE_NAMES[parse_u8(mem, 0x0)]
+        rtype = MwccType.load(parse_u32(mem, 0x6))
+        if MWCC_VERSION.name == "GC/1.1":
+            data_offset = 0xA
+        elif MWCC_VERSION.name == "GC/2.6":
+            data_offset = 0xE
+        else:
+            raise ValueError(f"Unsupported MWCC version: {MWCC_VERSION.name}")
+        if expr_type == "EINTCONST":
+            hi = parse_s32(mem, data_offset + 0)
+            lo = parse_u32(mem, data_offset + 4)
+            int_const = (hi << 32) | lo
+            return cls(
+                expr_type=expr_type,
+                rtype=rtype,
+                children=[],
+                int_const=int_const,
+            )
+        elif expr_type == "EFLOATCONST":
+            float_const = parse_f64(mem, data_offset)
+            return cls(
+                expr_type=expr_type,
+                rtype=rtype,
+                children=[],
+                float_const=float_const,
+            )
+        elif expr_type == "ESTRINGCONST":
+            string_const = read_string(parse_u32(mem, data_offset + 4))
+            return cls(
+                expr_type=expr_type,
+                rtype=rtype,
+                children=[],
+                string_const=string_const,
+            )
+        elif expr_type == "EOBJREF":
+            obj = MwccObject.load(parse_u32(mem, data_offset))
+            name = obj.name
+            return cls(
+                expr_type=expr_type,
+                rtype=rtype,
+                children=[],
+                name=name,
+            )
+        elif expr_type == "ELABEL":
+            label_addr = parse_u32(mem, data_offset)
+            label_name = read_u32(label_addr + 0x8)
+            label_name = read_string(label_name + 0xA)
+            return cls(
+                expr_type=expr_type,
+                rtype=rtype,
+                children=children,
+            )
+        elif expr_type in (
+            "EPOSTINC",
+            "EPOSTDEC",
+            "EPREINC",
+            "EPREDEC",
+            "EINDIRECT",
+            "EMONMIN",
+            "EBINNOT",
+            "ELOGNOT",
+            "EFORCELOAD",
+            "ETYPCON",
+            "EBITFIELD",
+        ):
+            # Unary operators
+            expr = cls.load(parse_u32(mem, data_offset))
+            return cls(
+                expr_type=expr_type,
+                rtype=rtype,
+                children=[expr],
+            )
+        elif expr_type in (
+            "EMUL",
+            "EMULV",
+            "EDIV",
+            "EMODULO",
+            "EADDV",
+            "ESUBV",
+            "EADD",
+            "ESUB",
+            "ESHL",
+            "ESHR",
+            "ELESS",
+            "EGREATER",
+            "ELESSEQU",
+            "EGREATEREQU",
+            "EEQU",
+            "ENOTEQU",
+            "EAND",
+            "EXOR",
+            "EOR",
+            "ELAND",
+            "ELOR",
+            "EASS",
+            "EMULASS",
+            "EDIVASS",
+            "EMODASS",
+            "EADDASS",
+            "ESUBASS",
+            "ESHLASS",
+            "ESHRASS",
+            "EANDASS",
+            "EXORASS",
+            "EORASS",
+            "EBCLR",
+            "EBSET",
+            "ECOMMA",
+            "EPMODULO",
+            "EROTL",
+            "EROTR",
+            "EBTST",
+            # TODO: ENULLCHECK has a unique id too
+            "ENULLCHECK",
+        ):
+            # Binary operators
+            left = cls.load(parse_u32(mem, data_offset))
+            right = cls.load(parse_u32(mem, data_offset + 4))
+            return cls(
+                expr_type=expr_type,
+                rtype=rtype,
+                children=[left, right],
+            )
+        elif expr_type in ("ECOND", "ECONDASS"):
+            # Ternary operators
+            cond = cls.load(parse_u32(mem, data_offset))
+            expr1 = cls.load(parse_u32(mem, data_offset + 4))
+            expr2 = cls.load(parse_u32(mem, data_offset + 8))
+            return cls(
+                expr_type=expr_type,
+                rtype=rtype,
+                children=[cond, expr1, expr2],
+            )
+        elif expr_type in ("EFUNCCALL", "EFUNCCALLP"):
+            # Function call
+            funcref = cls.load(parse_u32(mem, data_offset))
+            args_addr = parse_u32(mem, data_offset + 4)
+            children = [funcref]
+            while args_addr != 0:
+                args_mem = gdb.selected_inferior().read_memory(args_addr, 0x8)
+                arg = MwccENode.load(parse_u32(args_mem, 0x4))
+                children.append(arg)
+                args_addr = parse_u32(args_mem, 0x0)
+            return cls(
+                expr_type=expr_type,
+                rtype=rtype,
+                children=children,
+            )
+        elif expr_type in (
+            "EVECTORCONST",
+            "EPRECOMP",
+            "ETEMP",
+            "EINITTRYCATCH",
+            "EDEFINE",
+            "EREUSE",
+        ):
+            pass  # TODO
+        else:
+            raise ValueError(f"Unsupported expression type: {expr_type}")
+
+
+@dataclass
+class MwccStatement:
+    next_addr: int
+    stmt_type: int
+    expr_addr: int
+    line: Optional[int]
+    label_name: Optional[str]
+    # For ST_SWITCH
+    switch_cases: Optional[Tuple[int, str]] = None
+    default_label_name: Optional[str] = None
+
+    @classmethod
+    def load(cls, addr: int) -> MwccStatement:
+        mem = gdb.selected_inferior().read_memory(addr, 0x1A)
+        next_addr = parse_u32(mem, 0x0)
+        stmt_type = parse_u8(mem, 0x4)
+        expr_addr = parse_u32(mem, 0xA)
+        line = parse_s32(mem, 0x16)
+        if line == -1:
+            line = None
+        if stmt_type in (2, 3, 6, 7):  # ST_LABEL, ST_GOTO, ST_IFGOTO, ST_IFNGOTO
+            label_addr = parse_u32(mem, 0xE)
+            label_name = read_u32(label_addr + 0x8)
+            label_name = read_string(label_name + 0xA)
+        else:
+            label_name = None
+        if stmt_type == 5:  # ST_SWITCH
+            switch_info_addr = parse_u32(mem, 0xE)
+            switch_mem = gdb.selected_inferior().read_memory(switch_info_addr, 0x8)
+
+            case_addr = parse_u32(switch_mem, 0x0)
+            switch_cases = []
+            while case_addr != 0:
+                case_mem = gdb.selected_inferior().read_memory(case_addr, 0x10)
+                label_addr = parse_u32(case_mem, 0x4)
+                label_name = read_u32(label_addr + 0x8)
+                label_name = read_string(label_name + 0xA)
+                hi = parse_s32(case_mem, 0x8)
+                lo = parse_u32(case_mem, 0xC)
+                value = (hi << 32) | lo
+                switch_cases.append((value, label_name))
+                case_addr = parse_u32(case_mem, 0x0)
+            default_label_addr = parse_u32(switch_mem, 0x4)
+            default_label_name = read_u32(default_label_addr + 0x8)
+            default_label_name = read_string(default_label_name + 0xA)
+        else:
+            switch_cases = None
+            default_label_name = None
+        return cls(
+            next_addr=next_addr,
+            stmt_type=stmt_type,
+            expr_addr=expr_addr,
+            line=line,
+            label_name=label_name,
+            switch_cases=switch_cases,
+            default_label_name=default_label_name,
+        )
+
+
+def print_type(f, rtype: MwccType):
+    print(f" {format_type(rtype)}", file=f)
+
+
+def print_expression(f, expr: MwccENode, indent):
+    print("  " * indent, end="", file=f)
+
+    # TODO: print flags
+    expr_type = expr.expr_type
+    rtype = expr.rtype
+    print(f"{expr_type}", end="", file=f)
+
+    if expr_type == "EINTCONST":
+        print(f" [0x{expr.int_const:x}]", end="", file=f)
+        print_type(f, rtype)
+    elif expr_type == "EFLOATCONST":
+        # 17 significant figures is enough for any double, but we try 15 first
+        # to get a shorter representation if possible
+        float_str = f"{expr.float_const:.15g}"
+        if float(float_str) != expr.float_const:
+            float_str = f"{expr.float_const:.17g}"
+        print(f" [{float_str}]", end="", file=f)
+        print_type(f, rtype)
+    elif expr_type == "ESTRINGCONST":
+        encoding = ""
+        for c in expr.string_const:
+            if c == "\x00":
+                encoding += "\\0"
+            elif c == "\t":
+                encoding += "\\t"
+            elif c == "\n":
+                encoding += "\\n"
+            elif c == "\r":
+                encoding += "\\r"
+            elif c == "\\":
+                encoding += "\\\\"
+            elif c == '"':
+                encoding += '\\"'
+            elif c >= "\x20" and c <= "\x7e":
+                encoding += c
+            else:
+                encoding += f"\\x{ord(c):02x}"
+        print(f' ["{encoding}"]', end="", file=f)
+        print_type(f, rtype)
+    elif expr_type == "EVECTORCONST":
+        print(" <unimplemented>", file=f)
+    elif expr_type in ("EOBJREF", "ELABEL"):
+        print(f" [{expr.name}]", end="", file=f)
+        print_type(f, rtype)
+    elif expr_type in (
+        "EVECTORCONST",
+        "EPRECOMP",
+        "ETEMP",
+        "EINITTRYCATCH",
+        "EDEFINE",
+        "EREUSE",
+    ):
+        print(" <unimplemented>", file=f)
+    else:
+        print_type(f, rtype)
+        for child in expr.children:
+            print_expression(f, child, indent + 1)
+
+
+def print_statement(f, stmt: MwccStatement):
+    stmt_type = stmt.stmt_type
+    if stmt.line:
+        print(f"{stmt.line} ", end="", file=f)
+
+    if stmt_type == 1:
+        print(f"ST_NOP", file=f)
+    elif stmt_type == 2:
+        print(f"ST_LABEL L{stmt.label_name}", file=f)
+    elif stmt_type == 3:
+        print(f"ST_GOTO L{stmt.label_name}", file=f)
+    elif stmt_type == 4:
+        print(f"ST_EXPRESSION", file=f)
+        expr = MwccENode.load(stmt.expr_addr)
+        print_expression(f, expr, 1)
+    elif stmt_type == 5:
+        print(f"ST_SWITCH", file=f)
+        expr = MwccENode.load(stmt.expr_addr)
+        print_expression(f, expr, 1)
+        for value, label_name in stmt.switch_cases:
+            print(f"  CASE {value:#x}: L{label_name}", file=f)
+        print(f"  DEFAULT: L{stmt.default_label_name}", file=f)
+    elif stmt_type == 6:
+        print(f"ST_IFGOTO L{stmt.label_name}", file=f)
+        expr = MwccENode.load(stmt.expr_addr)
+        print_expression(f, expr, 1)
+    elif stmt_type == 7:
+        print(f"ST_IFNGOTO L{stmt.label_name}", file=f)
+        expr = MwccENode.load(stmt.expr_addr)
+        print_expression(f, expr, 1)
+    elif stmt_type == 8:
+        print(f"ST_RETURN", file=f)
+        if stmt.expr_addr != 0:
+            expr = MwccENode.load(stmt.expr_addr)
+            print_expression(f, expr, 1)
+    elif stmt_type == 12:
+        print(f"ST_BEGINCATCH", file=f)
+        expr = MwccENode.load(stmt.expr_addr)
+        print_expression(f, expr, 1)
+    elif stmt_type == 13:
+        print(f"ST_ENDCATCH", file=f)
+        expr = MwccENode.load(stmt.expr_addr)
+        print_expression(f, expr, 1)
+    elif stmt_type == 14:
+        print(f"ST_ENDCATCHDTOR", file=f)
+        expr = MwccENode.load(stmt.expr_addr)
+        print_expression(f, expr, 1)
+    elif stmt_type == 15:
+        print(f"ST_GOTOEXPR", file=f)
+        expr = MwccENode.load(stmt.expr_addr)
+        print_expression(f, expr, 1)
+    elif stmt_type == 16:
+        print(f"ST_ASM", file=f)
+        print("  ...", file=f)
+    else:
+        raise ValueError(f"Unknown statement type: {stmt_type}")
+
+
+def print_ast(stmt_addr: int, pass_number: int, pass_name: str):
+    output_path = Path(OUTPUT_DIR) / f"frontend-{pass_number:02}-ast-{pass_name}.txt"
+    print(f"Dumping AST to {output_path}")
+    with open(output_path, "w") as f:
+        while stmt_addr != 0:
+            stmt = MwccStatement.load(stmt_addr)
+            print_statement(f, stmt)
+            stmt_addr = stmt.next_addr
 
 
 @dataclass
@@ -743,7 +1296,6 @@ def print_block(f, block: MwccBlock):
 
 
 def print_pcode(pass_number: int, pass_name: str):
-    load_opcode_info()
     output_path = Path(OUTPUT_DIR) / f"backend-{pass_number:02}-{pass_name}.txt"
     print(f"Dumping PCode to {output_path}")
     with open(output_path, "w") as f:
@@ -938,6 +1490,8 @@ def run_compiler():
     gdb.execute("target remote localhost:9001")
 
     init_mwcc_version()
+    load_node_names()
+    load_opcode_info()
 
     # Find the function to analyze
     gdb.execute(f"break *{MWCC_VERSION.codegen_start_addr:#x}")
@@ -953,16 +1507,32 @@ def run_compiler():
     print()
 
     # Set breakpoints
-    gdb.execute(f"break *{MWCC_VERSION.codegen_end_addr:#x}")
-    gdb.execute(f"break *{MWCC_VERSION.regalloc_breakpoint_addr:#x}")
+    gdb.execute(f"break *{MWCC_VERSION.copt_optimizer_call_addr:#x}")
+    gdb.execute(f"break *{MWCC_VERSION.copt_optimizer_call_addr + 5:#x}")
     for addr in MWCC_VERSION.pcode_breakpoints:
         gdb.execute(f"break *{addr:#x}")
+    gdb.execute(f"break *{MWCC_VERSION.regalloc_breakpoint_addr:#x}")
+    gdb.execute(f"break *{MWCC_VERSION.codegen_end_addr:#x}")
 
     # Loop through breakpoints
+    frontend_pass_number = 0
     backend_pass_number = 0
     while True:
         gdb.execute("continue")
         current_addr = int(gdb.parse_and_eval("$pc"))
+
+        if current_addr == MWCC_VERSION.copt_optimizer_call_addr:
+            # Print argument 2 (before return address has been pushed)
+            sp = int(gdb.parse_and_eval("$esp"))
+            statement_addr = read_u32(sp + 0x4)
+            print_ast(statement_addr, frontend_pass_number, "initial-code")
+            frontend_pass_number += 1
+
+        if current_addr == MWCC_VERSION.copt_optimizer_call_addr + 5:
+            # Print returned statements in EAX
+            statements_addr = int(gdb.parse_and_eval("$eax"))
+            print_ast(statements_addr, frontend_pass_number, "final-code")
+            frontend_pass_number += 1
 
         if current_addr in MWCC_VERSION.pcode_breakpoints:
             pass_name = MWCC_VERSION.pcode_breakpoints[current_addr]

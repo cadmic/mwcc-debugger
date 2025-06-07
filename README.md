@@ -59,17 +59,21 @@ is a great resource.
 
 ### Frontend passes
 
-The frontend performs optimizations on an intermediate representation
-(creatively called "IR"). These optimizations include:
+The frontend parses C/C++ code into an abstract syntax tree, which is dumped as
+`frontend-00-ast-initial-code.txt`. If optimizations are enabled, the frontend
+transforms this into an intermediate representation (creatively called "IR") and
+performs optimizations on that. These optimizations include:
 * Some loop unrolling, including replacing "induction variables" (for example,
   replacing `i * 2` with a new variable which is incremented by 2 every
   iteration).
 * Common subexpression elimination, where repeated expressions are replaced with new variables.
 * Range splitting, where reuses of the same local variable are replaced with new variables.
 
-The new variables created by the frontend look like `@` followed by a number, e.g. `@123`.
+Debugging the frontend optimizations is not currently supported (but will be
+soon).
 
-Debugging the frontend is not currently supported (but could be soon).
+After optimizations, the code is transformed back into an abstract syntax tree
+(dumped as `ast-final-code`) before being handed off to the backend.
 
 ### Backend passes
 
