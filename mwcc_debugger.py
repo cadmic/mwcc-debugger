@@ -816,7 +816,8 @@ def find_current_function() -> MwccObject:
     # Instead, we walk the stack looking for the return address for the callers
     # of CodeGen_Generator, and inspect the second argument to CodeGen_Generator.
     if MWCC_VERSION.name == "GC/1.1":
-        stack_start = 0x00111000
+        # TODO: figure this out properly instead of guessing
+        stack_start = 0x00114000
         sp = int(gdb.parse_and_eval("$esp"))
         mem = gdb.selected_inferior().read_memory(sp, stack_start - sp)
         for offset in range(0, len(mem), 4):
