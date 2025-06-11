@@ -1460,22 +1460,10 @@ def print_variables():
 
 def find_current_function() -> MwccObject:
     # For GC/1.1, there seems to be no global variable for the current function.
-    # Instead, we walk the stack looking for the return address for the callers
-    # of CodeGen_Generator, and inspect the second argument to CodeGen_Generator.
+    # Instead, we inspect the stack for the second argument to CodeGen_Generator.
     if MWCC_VERSION.name == "GC/1.1":
-        # TODO: figure this out properly instead of guessing
-        stack_start = 0x00114000
         sp = int(gdb.parse_and_eval("$esp"))
-        mem = gdb.selected_inferior().read_memory(sp, stack_start - sp)
-        for offset in range(0, len(mem), 4):
-            value = parse_u32(mem, offset)
-            if value in (0x50F08B, 0x50F7B2, 0x510080):
-                # Found a return address for CodeGen_Generator
-                # The second argument is the current function pointer
-                current_function_addr = parse_u32(mem, offset + 8)
-                break
-        else:
-            raise ValueError(f"Could not find current function")
+        current_function_addr = read_u32(sp + 8)
     else:
         current_function_addr = read_u32(MWCC_VERSION.gfunction_addr)
     return MwccObject.load(current_function_addr, load_linkname=True)
