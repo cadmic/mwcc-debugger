@@ -10,7 +10,7 @@ Currently the following MWCC versions are supported:
 
 ## Installation (Linux or macOS)
 
-First, ensure `gdb` and [Rust](https://rustup.rs/) are installed.
+First, ensure `gdb`, `cmake`, and [Rust](https://rustup.rs/) are installed.
 
 Next, this project depends on @encounter's branch of `retrowin32` with GDB support.
 To build the fork:
