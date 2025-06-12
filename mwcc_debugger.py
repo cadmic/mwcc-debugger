@@ -654,7 +654,12 @@ class MwccENode:
             "EDEFINE",
             "EREUSE",
         ):
-            pass  # TODO
+            # TODO
+            return cls(
+                expr_type=expr_type,
+                rtype=rtype,
+                children=[],
+            )
         else:
             raise ValueError(f"Unsupported expression type: {expr_type}")
 
