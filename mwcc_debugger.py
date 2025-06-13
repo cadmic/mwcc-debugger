@@ -101,8 +101,9 @@ class MwccVersion:
     nodenames_addr: int
     # Number of entries in nodenames array
     nodenames_size: int
-    # Breakpoint address for call to COpt_Optimizer()
-    copt_optimizer_call_addr: int
+    # Breakpoint addresses after AST processing, with the names of frontend passes.
+    # Statement pointer should be the first element on the stack.
+    ast_breakpoints: dict[int, str]
     # Address of opcode info table
     opcodeinfo_addr: int
     # Number of entries in the opcode info table
@@ -150,7 +151,11 @@ def init_mwcc_version():
             cmangler_getlinkname_addr=0x4C2C70,
             nodenames_addr=0x561CB4,
             nodenames_size=75,
-            copt_optimizer_call_addr=0x43538E,
+            ast_breakpoints={
+                0x43538D: "initial-code",
+                0x4353B4: "after-optimizations",
+                0x4353B9: "final-code",
+            },
             opcodeinfo_addr=0x5664B0,
             opcodeinfo_size=468,
             pcbasicblocks_addr=0x588474,
@@ -228,7 +233,11 @@ def init_mwcc_version():
             cmangler_getlinkname_addr=0x4FE6A0,
             nodenames_addr=0x5BC980,
             nodenames_size=77,
-            copt_optimizer_call_addr=0x43356D,
+            ast_breakpoints={
+                0x433566: "initial-code",
+                0x433599: "after-optimizations",
+                0x43359E: "final-code",
+            },
             opcodeinfo_addr=0x5C0FA8,
             opcodeinfo_size=471,
             pcbasicblocks_addr=0x5EA748,
@@ -1623,8 +1632,8 @@ def run_compiler():
     print()
 
     # Set breakpoints
-    gdb.execute(f"break *{MWCC_VERSION.copt_optimizer_call_addr:#x}")
-    gdb.execute(f"break *{MWCC_VERSION.copt_optimizer_call_addr + 5:#x}")
+    for addr in MWCC_VERSION.ast_breakpoints:
+        gdb.execute(f"break *{addr:#x}")
     for addr in MWCC_VERSION.pcode_breakpoints:
         gdb.execute(f"break *{addr:#x}")
     gdb.execute(f"break *{MWCC_VERSION.regalloc_breakpoint_addr:#x}")
@@ -1637,17 +1646,11 @@ def run_compiler():
         gdb.execute("continue")
         current_addr = int(gdb.parse_and_eval("$pc"))
 
-        if current_addr == MWCC_VERSION.copt_optimizer_call_addr:
-            # Print argument 2 (before return address has been pushed)
+        if current_addr in MWCC_VERSION.ast_breakpoints:
+            pass_name = MWCC_VERSION.ast_breakpoints[current_addr]
             sp = int(gdb.parse_and_eval("$esp"))
-            statement_addr = read_u32(sp + 0x4)
-            print_ast(statement_addr, frontend_pass_number, "initial-code")
-            frontend_pass_number += 1
-
-        if current_addr == MWCC_VERSION.copt_optimizer_call_addr + 5:
-            # Print returned statements in EAX
-            statements_addr = int(gdb.parse_and_eval("$eax"))
-            print_ast(statements_addr, frontend_pass_number, "final-code")
+            statement_addr = read_u32(sp)
+            print_ast(statement_addr, frontend_pass_number, pass_name)
             frontend_pass_number += 1
 
         if current_addr in MWCC_VERSION.pcode_breakpoints:

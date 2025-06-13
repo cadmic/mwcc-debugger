@@ -73,7 +73,8 @@ Debugging the frontend optimizations is not currently supported (but will be
 soon).
 
 After optimizations, the code is transformed back into an abstract syntax tree
-(dumped as `ast-final-code`) before being handed off to the backend.
+(dumped as `ast-after-optimizations`) and data references are expanded (dumped as
+`ast-final-code`) before being handed off to the backend.
 
 ### Backend passes
 
