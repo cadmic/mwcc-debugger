@@ -776,7 +776,7 @@ def print_expression(f, expr: MwccENode, indent):
     print(f"{expr_type}", end="", file=f)
 
     if expr_type == "EINTCONST":
-        print(f" [0x{expr.int_const:x}]", end="", file=f)
+        print(f" [{expr.int_const:#x}]", end="", file=f)
         print_type(f, rtype)
     elif expr_type == "EFLOATCONST":
         # 17 significant figures is enough for any double, but we try 15 first
